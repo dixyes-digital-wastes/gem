@@ -19,9 +19,11 @@ use Swow\Examples\Gemm\Kernel\F32Gemv;
 use Swow\Examples\Gemm\Quantization\Q4_0;
 use Swow\Examples\Gemm\Quantization\Q8_0;
 use Swow\Examples\Transformer\Graph\Weight;
+use Swow\Examples\Transformer\ToyBackend;
 
 use function array_map;
 use function intdiv;
+use function Toy\Tensor\matvec_f32;
 
 /*
  * Linear kernels.
@@ -56,12 +58,11 @@ final class Linear
         $context = CooperativeContext::current();
         if ($context === null || !self::canSplit($weights) || self::work($weights) < self::MIN_PARALLEL_WORK) {
             return array_map(
-                static fn(Weight $weight): array => self::compute(
-                    $weight->data(),
-                    $weight->type(),
-                    $input,
+                static fn(Weight $weight): array => self::computeRange(
+                    $weight,
+                    0,
                     $weight->rows(),
-                    $weight->columns(),
+                    $input,
                 ),
                 $weights,
             );
@@ -75,13 +76,7 @@ final class Linear
             $columns = $weight->columns();
             $begin = intdiv($rows * $context->rank, $context->threads);
             $end = intdiv($rows * ($context->rank + 1), $context->threads);
-            $values = self::compute(
-                $weight->slice($begin, $end),
-                $weight->type(),
-                $input,
-                $end - $begin,
-                $columns,
-            );
+            $values = self::computeRange($weight, $begin, $end, $input);
             $buffer->writeF64($offset + $begin * 8, $values);
             $ranges[] = [$offset, $rows];
             $offset += $rows * 8;
@@ -121,6 +116,30 @@ final class Linear
         }
 
         return $work;
+    }
+
+    /**
+     * @param list<float> $input
+     * @return list<float>
+     */
+    private static function computeRange(Weight $weight, int $begin, int $end, array $input): array
+    {
+        $rows = $end - $begin;
+        if ($rows === 0) {
+            return [];
+        }
+        $columns = $weight->columns();
+        $tensor = ToyBackend::linearWeight($weight, $begin, $end);
+        if ($tensor !== null) {
+            return ToyBackend::floats(matvec_f32(
+                $tensor,
+                ToyBackend::vector($input, [$columns]),
+                $rows,
+                $columns,
+            ));
+        }
+
+        return self::compute($weight->slice($begin, $end), $weight->type(), $input, $rows, $columns);
     }
 
     /**

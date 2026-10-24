@@ -17,9 +17,11 @@ namespace Swow\Examples\Transformer\Graph\Kernel;
 use Swow\Examples\Transformer\Graph\DType;
 use Swow\Examples\Transformer\Graph\GraphException;
 use Swow\Examples\Transformer\Graph\Kernel;
+use Swow\Examples\Transformer\ToyBackend;
 
 use function count;
 use function sqrt;
+use function Toy\Tensor\rmsnorm;
 
 final class RmsNormKernel implements Kernel
 {
@@ -34,6 +36,17 @@ final class RmsNormKernel implements Kernel
         $weights = $weight->data();
         if (count($data) !== count($weights)) {
             throw new GraphException('rms_norm shape mismatch');
+        }
+        if (
+            ToyBackend::enabled()
+            && count($input->shape()->dimensions()) === 1
+            && count($weight->shape()->dimensions()) === 1
+        ) {
+            return ToyBackend::floats(rmsnorm(
+                ToyBackend::vector($data, $input->shape()->dimensions()),
+                ToyBackend::vector($weights, $weight->shape()->dimensions()),
+                $eps,
+            ));
         }
         $square = 0.0;
         foreach ($data as $value) {

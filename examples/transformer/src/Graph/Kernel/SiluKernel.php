@@ -14,17 +14,30 @@ declare(strict_types=1);
 
 namespace Swow\Examples\Transformer\Graph\Kernel;
 
+use Swow\Examples\Transformer\Graph\DType;
 use Swow\Examples\Transformer\Graph\Kernel;
+use Swow\Examples\Transformer\ToyBackend;
 
+use function count;
 use function exp;
+use function Toy\Tensor\silu;
 
 final class SiluKernel implements Kernel
 {
     public function execute(array $inputs, array $attrs): array
     {
         [$input] = $inputs;
+        $data = $input->data();
+        $dimensions = $input->shape()->dimensions();
+        if (
+            ToyBackend::enabled()
+            && $input->dtype() === DType::F32
+            && count($dimensions) <= ToyBackend::MAX_RANK
+        ) {
+            return ToyBackend::floats(silu(ToyBackend::vector($data, $dimensions)));
+        }
         $result = [];
-        foreach ($input->data() as $value) {
+        foreach ($data as $value) {
             $result[] = $value / (1.0 + exp(-$value));
         }
 

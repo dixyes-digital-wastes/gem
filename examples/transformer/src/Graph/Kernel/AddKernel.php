@@ -14,16 +14,35 @@ declare(strict_types=1);
 
 namespace Swow\Examples\Transformer\Graph\Kernel;
 
+use Swow\Examples\Transformer\Graph\DType;
 use Swow\Examples\Transformer\Graph\Kernel;
+use Swow\Examples\Transformer\ToyBackend;
+
+use function count;
+use function Toy\Tensor\add;
 
 final class AddKernel implements Kernel
 {
     public function execute(array $inputs, array $attrs): array
     {
         [$left, $right] = $inputs;
+        $leftData = $left->data();
+        $rightData = $right->data();
+        $dimensions = $left->shape()->dimensions();
+        if (
+            ToyBackend::enabled()
+            && $left->dtype() === DType::F32
+            && $right->dtype() === DType::F32
+            && count($dimensions) <= ToyBackend::MAX_RANK
+        ) {
+            return ToyBackend::floats(add(
+                ToyBackend::vector($leftData, $dimensions),
+                ToyBackend::vector($rightData, $dimensions),
+            ));
+        }
         $result = [];
-        foreach ($left->data() as $index => $value) {
-            $result[] = $value + $right->data()[$index];
+        foreach ($leftData as $index => $value) {
+            $result[] = $value + $rightData[$index];
         }
 
         return $result;
