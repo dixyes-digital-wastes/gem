@@ -31,18 +31,35 @@ final class XtermTerminal
 {
     private const ERASE_LINE = "\x1b[2K";
 
+    private const STD_INPUT_HANDLE = -10;
+    private const STD_OUTPUT_HANDLE = -11;
+    private const ENABLE_PROCESSED_INPUT = 0x0001;
+    private const ENABLE_LINE_INPUT = 0x0002;
+    private const ENABLE_ECHO_INPUT = 0x0004;
+    private const ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+
+    private static ?\FFI $kernel32 = null;
+
     private ?string $savedModes = null;
+
+    /** @var array{input: int, output: int}|null */
+    private ?array $savedWindowsMode = null;
 
     public function __construct()
     {
-        if (!stream_isatty(STDIN)) {
+        if (!stream_isatty(STDIN) && !self::isWindowsConsole()) {
             throw new RuntimeException('Chat requires a TTY on stdin');
         }
     }
 
     public function enterRawMode(): void
     {
-        if ($this->savedModes !== null) {
+        if ($this->savedModes !== null || $this->savedWindowsMode !== null) {
+            return;
+        }
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->enterWindowsRawMode();
+
             return;
         }
         $saved = shell_exec('stty -g < /dev/tty 2>/dev/null');
@@ -55,12 +72,92 @@ final class XtermTerminal
 
     public function restore(): void
     {
+        if ($this->savedWindowsMode !== null) {
+            $this->restoreWindowsMode();
+
+            return;
+        }
         if ($this->savedModes === null) {
             return;
         }
         shell_exec('stty ' . $this->savedModes . ' < /dev/tty 2>/dev/null');
         $this->savedModes = null;
         $this->showCursor();
+    }
+
+    private static function kernel32(): \FFI
+    {
+        if (self::$kernel32 === null) {
+            self::$kernel32 = \FFI::cdef(<<<'C'
+typedef void *HANDLE;
+HANDLE GetStdHandle(int nStdHandle);
+int GetConsoleMode(HANDLE hConsoleHandle, unsigned long *lpMode);
+int SetConsoleMode(HANDLE hConsoleHandle, unsigned long dwMode);
+C, 'kernel32.dll');
+        }
+
+        return self::$kernel32;
+    }
+
+    private static function isWindowsConsole(): bool
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            return false;
+        }
+        try {
+            $ffi = self::kernel32();
+            $mode = $ffi->new('unsigned long');
+
+            return $ffi->GetConsoleMode(
+                $ffi->GetStdHandle(self::STD_INPUT_HANDLE),
+                \FFI::addr($mode),
+            ) !== 0;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    private function enterWindowsRawMode(): void
+    {
+        $ffi = self::kernel32();
+        $input = $ffi->GetStdHandle(self::STD_INPUT_HANDLE);
+        $output = $ffi->GetStdHandle(self::STD_OUTPUT_HANDLE);
+        $inputMode = $ffi->new('unsigned long');
+        $outputMode = $ffi->new('unsigned long');
+        if ($ffi->GetConsoleMode($input, \FFI::addr($inputMode)) === 0
+            || $ffi->GetConsoleMode($output, \FFI::addr($outputMode)) === 0) {
+            throw new RuntimeException('Unable to read console modes');
+        }
+
+        $newInputMode = $inputMode->cdata & ~(
+            self::ENABLE_PROCESSED_INPUT
+            | self::ENABLE_LINE_INPUT
+            | self::ENABLE_ECHO_INPUT
+        );
+        if ($ffi->SetConsoleMode($input, $newInputMode) === 0) {
+            throw new RuntimeException('Unable to set console input mode');
+        }
+        $newOutputMode = $outputMode->cdata | self::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        if ($ffi->SetConsoleMode($output, $newOutputMode) === 0) {
+            throw new RuntimeException('Unable to set console output mode');
+        }
+        $this->savedWindowsMode = [
+            'input' => $inputMode->cdata,
+            'output' => $outputMode->cdata,
+        ];
+    }
+
+    private function restoreWindowsMode(): void
+    {
+        $mode = $this->savedWindowsMode;
+        $this->savedWindowsMode = null;
+        $this->showCursor();
+        if ($mode === null) {
+            return;
+        }
+        $ffi = self::kernel32();
+        $ffi->SetConsoleMode($ffi->GetStdHandle(self::STD_INPUT_HANDLE), $mode['input']);
+        $ffi->SetConsoleMode($ffi->GetStdHandle(self::STD_OUTPUT_HANDLE), $mode['output']);
     }
 
     public function __destruct()
@@ -89,6 +186,10 @@ final class XtermTerminal
                 return false;
             }
             if ($byte === 0x04) {
+                $this->write("\r" . self::ERASE_LINE . "\n");
+                return null;
+            }
+            if ($byte === 0x1A && PHP_OS_FAMILY === 'Windows') {
                 $this->write("\r" . self::ERASE_LINE . "\n");
                 return null;
             }
