@@ -61,6 +61,9 @@ final class Qwen35Model
     /** @var array<int, float> */
     private array $ropeInverse = [];
 
+    /** @var array<string, list<float>> */
+    private array $f32Cache = [];
+
     private Graph $graph;
 
     /** @var callable|null */
@@ -233,13 +236,16 @@ final class Qwen35Model
     /** @return list<float> */
     private function f32Tensor(string $name): array
     {
+        if (isset($this->f32Cache[$name])) {
+            return $this->f32Cache[$name];
+        }
         $raw = $this->file->readAll($name);
         $info = $this->file->tensor($name);
         if ($info->ggmlType() !== GgmlType::F32) {
             throw new RuntimeException("Expected F32 tensor: {$name}");
         }
 
-        return array_values(unpack('g*', $raw));
+        return $this->f32Cache[$name] = array_values(unpack('g*', $raw));
     }
 
     /** @return list<float> */
