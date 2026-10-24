@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/autoload.php';
 
+use Swow\Examples\Transformer\Chat\ContextLimitException;
 use Swow\Examples\Transformer\Chat\Conversation;
 use Swow\Examples\Transformer\Gguf\GgufFile;
 use Swow\Examples\Transformer\Sampler\Sampler;
@@ -34,6 +35,7 @@ if ($argc < 2) {
     fwrite(STDERR, "  --greedy          greedy sampling\n");
     fwrite(STDERR, "  --threads=N       inference threads, default physical cores\n");
     fwrite(STDERR, "  --no-pin          disable physical-core pinning\n");
+    fwrite(STDERR, "  --plain           use a line-based prompt instead of the TUI\n");
     fwrite(STDERR, "  --temp=N --top-k=N --top-p=N --min-p=N --seed=N\n");
     exit(1);
 }
@@ -45,6 +47,7 @@ $system = 'You are a helpful assistant';
 $thinking = false;
 $threads = ThreadConfig::defaultThreads();
 $pinned = true;
+$plain = false;
 $config = new SamplingConfig();
 foreach (array_slice($argv, 2) as $argument) {
     if ($argument === '--thinking') {
@@ -61,6 +64,10 @@ foreach (array_slice($argv, 2) as $argument) {
     }
     if ($argument === '--no-pin') {
         $pinned = false;
+        continue;
+    }
+    if ($argument === '--plain' || $argument === '--no-tui') {
+        $plain = true;
         continue;
     }
     if (!str_starts_with($argument, '--') || !str_contains($argument, '=')) {
@@ -90,7 +97,7 @@ ThreadConfig::setThreads($threads);
 ThreadConfig::setPinned($pinned);
 
 ini_set('memory_limit', '-1');
-$terminal = new XtermTerminal();
+$terminal = $plain ? null : new XtermTerminal();
 $file = GgufFile::open($modelPath);
 $tokenizer = QwenTokenizer::fromGguf($file);
 $pool = new CooperativePool($modelPath, $threads);
@@ -106,7 +113,32 @@ $conversation = new Conversation(
 );
 
 try {
-    (new ChatTui($terminal, $conversation, $system))->run();
+    if ($plain) {
+        if ($system !== null && $system !== '') {
+            echo "System: {$system}\n\n";
+        }
+        while (($line = fgets(STDIN)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            if ($line === '/exit') {
+                break;
+            }
+            echo "> {$line}\nAssistant: ";
+            try {
+                $conversation->respond($line, static function (string $piece): void {
+                    echo $piece;
+                    flush();
+                });
+            } catch (ContextLimitException) {
+                echo '[context limit]';
+            }
+            echo "\n\n";
+        }
+    } else {
+        (new ChatTui($terminal, $conversation, $system))->run();
+    }
 } finally {
     $pool->shutdown();
     $file->close();
