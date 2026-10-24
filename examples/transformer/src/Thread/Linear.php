@@ -24,6 +24,7 @@ use Swow\Examples\Transformer\ToyBackend;
 use function array_map;
 use function intdiv;
 use function Toy\Tensor\matvec_f32;
+use function Toy\Tensor\matvec_q8_0_q8_0;
 
 /*
  * Linear kernels.
@@ -129,14 +130,26 @@ final class Linear
             return [];
         }
         $columns = $weight->columns();
-        $tensor = ToyBackend::linearWeight($weight, $begin, $end);
-        if ($tensor !== null) {
-            return ToyBackend::floats(matvec_f32(
-                $tensor,
-                ToyBackend::vector($input, [$columns]),
-                $rows,
-                $columns,
-            ));
+        if ($weight->type() === Weight::Q8_0) {
+            $tensor = ToyBackend::q8LinearWeight($weight, $begin, $end);
+            if ($tensor !== null) {
+                return ToyBackend::floats(matvec_q8_0_q8_0(
+                    $tensor,
+                    ToyBackend::q8Vector(Q8_0::quantize($input), $columns),
+                    $rows,
+                    $columns,
+                ));
+            }
+        } else {
+            $tensor = ToyBackend::linearWeight($weight, $begin, $end);
+            if ($tensor !== null) {
+                return ToyBackend::floats(matvec_f32(
+                    $tensor,
+                    ToyBackend::vector($input, [$columns]),
+                    $rows,
+                    $columns,
+                ));
+            }
         }
 
         return self::compute($weight->slice($begin, $end), $weight->type(), $input, $rows, $columns);

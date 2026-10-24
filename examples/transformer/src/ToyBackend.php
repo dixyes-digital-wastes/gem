@@ -28,17 +28,22 @@ use function unpack;
  * Bridge to the optional toy extension.
  *
  * Callers check enabled() before any toy symbol is touched, so the demo keeps
- * working without the extension. F32 weight tensors are cached per Weight
- * object and row range; the weak map releases them with the model
+ * working without the extension. F32 and q8_0 weight tensors are cached per
+ * Weight object and row range; the weak maps release them with the model
  */
 final class ToyBackend
 {
     public const MAX_RANK = 4;
 
-    private const DTYPE = 'f32';
+    private const F32_DTYPE = 'f32';
+
+    private const Q8_DTYPE = 'q8_0';
 
     /** @var WeakMap<Weight, array<string, Tensor>>|null */
-    private static ?WeakMap $weights = null;
+    private static ?WeakMap $f32Weights = null;
+
+    /** @var WeakMap<Weight, array<string, Tensor>>|null */
+    private static ?WeakMap $q8Weights = null;
 
     private static ?bool $enabled = null;
 
@@ -57,7 +62,13 @@ final class ToyBackend
      */
     public static function vector(array $values, array $shape): Tensor
     {
-        return Tensor::fromBytes(self::DTYPE, $shape, pack('g*', ...$values));
+        return Tensor::fromBytes(self::F32_DTYPE, $shape, pack('g*', ...$values));
+    }
+
+    /** Return a q8_0 vector tensor from the bytes of Q8_0::quantize() */
+    public static function q8Vector(string $bytes, int $columns): Tensor
+    {
+        return Tensor::fromBytes(self::Q8_DTYPE, [$columns], $bytes);
     }
 
     /** @return list<float> */
@@ -72,17 +83,31 @@ final class ToyBackend
         if (!self::enabled() || $weight->type() !== Weight::F32) {
             return null;
         }
-        self::$weights ??= new WeakMap();
+        return self::cached(self::$f32Weights ??= new WeakMap(), $weight, $begin, $end, self::F32_DTYPE);
+    }
+
+    /** Return the cached q8_0 tensor for a row range of a q8_0 weight, null otherwise */
+    public static function q8LinearWeight(Weight $weight, int $begin, int $end): ?Tensor
+    {
+        if (!self::enabled() || $weight->type() !== Weight::Q8_0) {
+            return null;
+        }
+        return self::cached(self::$q8Weights ??= new WeakMap(), $weight, $begin, $end, self::Q8_DTYPE);
+    }
+
+    /** @param WeakMap<Weight, array<string, Tensor>> $cache */
+    private static function cached(WeakMap $cache, Weight $weight, int $begin, int $end, string $dtype): Tensor
+    {
         $key = $begin . ':' . $end;
-        $tensors = self::$weights[$weight] ?? [];
+        $tensors = $cache[$weight] ?? [];
         if (isset($tensors[$key])) {
             return $tensors[$key];
         }
         $bytes = $begin === 0 && $end === $weight->rows() && !$weight->isLazy()
             ? $weight->data()
             : $weight->slice($begin, $end);
-        $tensors[$key] = Tensor::fromBytes(self::DTYPE, [$end - $begin, $weight->columns()], $bytes);
-        self::$weights[$weight] = $tensors;
+        $tensors[$key] = Tensor::fromBytes($dtype, [$end - $begin, $weight->columns()], $bytes);
+        $cache[$weight] = $tensors;
 
         return $tensors[$key];
     }
