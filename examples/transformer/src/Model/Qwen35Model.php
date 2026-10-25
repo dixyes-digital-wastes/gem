@@ -344,9 +344,18 @@ final class Qwen35Model
                 $gateSigmoid[] = $this->sigmoid($value);
             }
         }
+        /* The workers split the heads, so one softmax pass per head runs once
+         * and the gated heads travel through the exchange buffer */
+        $context = CooperativeContext::current();
+        $headCount = $this->config->headCount;
+        $split = $context !== null
+            && $context->threads > 1
+            && $headCount >= 2 * $context->threads
+            && $headCount * $headDim <= CooperativeContext::EXCHANGE_FLOATS;
+        [$headBegin, $headEnd] = $split ? $context->range($headCount) : [0, $headCount];
         $attention = [];
         $pregate = [];
-        for ($head = 0; $head < $this->config->headCount; $head++) {
+        for ($head = $headBegin; $head < $headEnd; $head++) {
             $kvHead = intdiv($head, $headsPerKv);
             $scores = [];
             $maximum = -1.0e30;
@@ -370,11 +379,19 @@ final class Qwen35Model
                 for ($step = 0; $step <= $position; $step++) {
                     $value += $scores[$step] / $sum * $this->vCache[$layer][$step][$kvHead * $headDim + $dim];
                 }
-                $pregate[$head * $headDim + $dim] = $value;
-                $attention[$head * $headDim + $dim] = $value * $gateSigmoid[$head * $headDim + $dim];
+                $pregate[] = $value;
+                $attention[] = $value * $gateSigmoid[$head * $headDim + $dim];
             }
         }
         $this->debug('attn_pregate-' . $layer, $pregate);
+        if ($split) {
+            /* The pregate mark above holds the local heads only */
+            $context->exchange->writeF64($headBegin * $headDim * 8, $attention);
+            if (!$context->opBarrier->wait(CooperativeContext::BARRIER_TIMEOUT)) {
+                throw new RuntimeException('Attention barrier timed out');
+            }
+            $attention = $context->exchange->viewF64(0, $headCount * $headDim);
+        }
         $this->debug('attn_gated-' . $layer, $attention);
 
         $output = $this->graph->linear(

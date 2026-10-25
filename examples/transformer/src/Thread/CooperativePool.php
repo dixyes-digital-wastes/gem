@@ -60,6 +60,8 @@ final class CooperativePool implements Inferencer
 
     private SharedBuffer $logits;
 
+    private SharedBuffer $exchange;
+
     private Futex $job;
 
     private CooperativeBarrier $opBarrier;
@@ -92,6 +94,7 @@ final class CooperativePool implements Inferencer
         $this->outputA = new SharedBuffer(self::MAX_ROWS * 8);
         $this->outputB = new SharedBuffer(self::MAX_ROWS * 8);
         $this->logits = new SharedBuffer($this->logitsRows * 8);
+        $this->exchange = new SharedBuffer(CooperativeContext::EXCHANGE_FLOATS * 8);
         $this->job = new Futex(0);
         $this->opBarrier = new CooperativeBarrier($this->threads);
         $this->tokenBarrier = new ThreadBarrier($this->threads + 1);
@@ -167,6 +170,7 @@ final class CooperativePool implements Inferencer
                         $this->outputA,
                         $this->outputB,
                         $this->logits,
+                        $this->exchange,
                         $this->job,
                         $this->opBarrier,
                         $this->tokenBarrier,

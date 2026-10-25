@@ -18,6 +18,8 @@ use RuntimeException;
 use Swow\SharedBuffer;
 use Swow\Sync\ThreadBarrier;
 
+use function intdiv;
+
 /*
  * Per-worker state of the cooperative execution.
  *
@@ -29,6 +31,12 @@ use Swow\Sync\ThreadBarrier;
  */
 final class CooperativeContext
 {
+    /* Doubles of one exchange buffer. A vector that does not fit stays
+     * duplicated in every worker */
+    public const EXCHANGE_FLOATS = 8_192;
+
+    public const BARRIER_TIMEOUT = 60_000;
+
     private static ?self $current = null;
 
     private int $opIndex = 0;
@@ -39,6 +47,7 @@ final class CooperativeContext
         public SharedBuffer $outputA,
         public SharedBuffer $outputB,
         public SharedBuffer $logits,
+        public SharedBuffer $exchange,
         public SharedBuffer $control,
         public CooperativeBarrier $opBarrier,
         public ThreadBarrier $tokenBarrier,
@@ -72,6 +81,22 @@ final class CooperativeContext
     public function outputBuffer(int $index): SharedBuffer
     {
         return ($index & 1) === 0 ? $this->outputA : $this->outputB;
+    }
+
+    /**
+     * Half open range of $count items for this worker
+     *
+     * The ranges tile the item range, so every worker owns its slice and no
+     * reduction is needed
+     *
+     * @return array{int, int}
+     */
+    public function range(int $count): array
+    {
+        return [
+            intdiv($count * $this->rank, $this->threads),
+            intdiv($count * ($this->rank + 1), $this->threads),
+        ];
     }
 
     public function opIndex(): int
