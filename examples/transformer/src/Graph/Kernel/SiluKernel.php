@@ -24,18 +24,18 @@ use function Toy\Tensor\silu;
 
 final class SiluKernel implements Kernel
 {
-    public function execute(array $inputs, array $attrs): array
+    public function execute(array $inputs, array $attrs): array|object
     {
         [$input] = $inputs;
-        $data = $input->data();
         $dimensions = $input->shape()->dimensions();
         if (
             ToyBackend::enabled()
             && $input->dtype() === DType::F32
             && count($dimensions) <= ToyBackend::MAX_RANK
         ) {
-            return ToyBackend::floats(silu(ToyBackend::vector($data, $dimensions)));
+            return silu($input->toTensor());
         }
+        $data = $input->data();
         $result = [];
         foreach ($data as $value) {
             $result[] = $value / (1.0 + exp(-$value));

@@ -19,12 +19,13 @@ use Swow\Examples\Transformer\Graph\GraphException;
 use Swow\Examples\Transformer\Graph\Kernel;
 use Swow\Examples\Transformer\Graph\Weight;
 use Swow\Examples\Transformer\Thread\Linear;
+use Swow\Examples\Transformer\ToyBackend;
 
 use function count;
 
 final class LinearKernel implements Kernel
 {
-    public function execute(array $inputs, array $attrs): array
+    public function execute(array $inputs, array $attrs): array|object
     {
         [$input] = $inputs;
         $weight = $attrs['weight'] ?? null;
@@ -34,13 +35,17 @@ final class LinearKernel implements Kernel
         if ($input->dtype() !== DType::F32) {
             throw new GraphException('linear input must be f32');
         }
-        if (count($input->data()) !== $weight->columns()) {
+        if ($input->shape()->count() !== $weight->columns()) {
             throw new GraphException('linear input width does not match weight columns');
         }
         if (($attrs['transpose'] ?? false) === true) {
             throw new GraphException('transposed linear is not implemented');
         }
 
-        return Linear::matvec($weight, $input->data());
+        if (!ToyBackend::enabled()) {
+            return Linear::matvec($weight, $input->data());
+        }
+
+        return Linear::matvec($weight, $input->payload() ?? $input->data(), true);
     }
 }

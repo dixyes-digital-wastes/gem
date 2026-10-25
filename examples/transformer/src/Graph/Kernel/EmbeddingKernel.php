@@ -27,7 +27,7 @@ use function unpack;
 
 final class EmbeddingKernel implements Kernel
 {
-    public function execute(array $inputs, array $attrs): array
+    public function execute(array $inputs, array $attrs): array|object
     {
         [$tokens] = $inputs;
         $weight = $attrs['weight'] ?? null;

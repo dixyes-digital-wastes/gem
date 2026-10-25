@@ -81,6 +81,9 @@ final class Qwen35Model
     /** @var array<string, Tensor> */
     private array $constTensors = [];
 
+    /** @var array<string, Tensor> */
+    private array $normWeightPayloads = [];
+
     /** @var array<int, float> */
     private array $ropeInverse = [];
 
@@ -128,55 +131,57 @@ final class Qwen35Model
     /** @return list<float> */
     public function forward(int $token, int $position): array
     {
+        return $this->forwardTensor($token, $position)->data();
+    }
+
+    /**
+     * Run one token and return the logits as a tensor
+     *
+     * The cooperative workers hand the tensor to the logits buffer without
+     * unpacking it
+     */
+    public function forwardTensor(int $token, int $position): \Swow\Examples\Transformer\Graph\Tensor
+    {
         $this->graph = new Graph();
         $embedding = $this->embeddingRow($token);
         $this->debug('model.input_embed', $embedding);
         $x = $this->graph->value('embedding', new Shape($this->config->hiddenSize), $embedding);
 
         for ($layer = 0; $layer < $this->config->blockCount; $layer++) {
-            $normData = $this->rmsNorm(
+            $norm = $this->rmsNorm(
                 $x,
-                $this->f32Tensor('blk.' . $layer . '.attn_norm.weight'),
+                'blk.' . $layer . '.attn_norm.weight',
                 $this->config->rmsEps,
-            )->data();
-            $this->debug('attn_norm-' . $layer, $normData);
-            $norm = $this->graph->value('attn_norm_' . $layer, new Shape($this->config->hiddenSize), $normData);
+            );
+            $this->debugGraph('attn_norm-' . $layer, $norm);
 
             $attention = $this->config->isFullAttention($layer)
                 ? $this->fullAttention($norm, $layer, $position)
                 : $this->gatedDeltaNet($norm, $layer, $position);
-            $this->debug(
+            $this->debugGraph(
                 ($this->config->isFullAttention($layer) ? 'attn_output-' : 'linear_attn_out-') . $layer,
                 $attention,
             );
 
-            $x = $this->graph->add(
-                $x,
-                $this->graph->value('attn_out_' . $layer, new Shape($this->config->hiddenSize), $attention),
-            );
-            $this->debug('attn_residual-' . $layer, $x->data());
+            $x = $this->graph->add($x, $attention);
+            $this->debugGraph('attn_residual-' . $layer, $x);
 
             $postNorm = $this->rmsNorm(
                 $x,
-                $this->f32Tensor('blk.' . $layer . '.post_attention_norm.weight'),
+                'blk.' . $layer . '.post_attention_norm.weight',
                 $this->config->rmsEps,
             );
-            $this->debug('attn_post_norm-' . $layer, $postNorm->data());
-            $ffnInput = $postNorm;
-            $x = $this->layerFfn($x, $ffnInput, $layer);
-            $this->debug('l_out-' . $layer, $x->data());
+            $this->debugGraph('attn_post_norm-' . $layer, $postNorm);
+            $x = $this->layerFfn($x, $postNorm, $layer);
+            $this->debugGraph('l_out-' . $layer, $x);
         }
 
-        $norm = $this->rmsNorm(
-            $x,
-            $this->f32Tensor('output_norm.weight'),
-            $this->config->rmsEps,
-        );
-        $this->debug('result_norm', $norm->data());
+        $norm = $this->rmsNorm($x, 'output_norm.weight', $this->config->rmsEps);
+        $this->debugGraph('result_norm', $norm);
         $logits = $this->graph->linear($norm, $this->tokenEmbedding());
-        $this->debug('result_output', $logits->data());
+        $this->debugGraph('result_output', $logits);
 
-        return $logits->data();
+        return $logits;
     }
 
     /**
@@ -185,7 +190,11 @@ final class Qwen35Model
      */
     private function linearMany(\Swow\Examples\Transformer\Graph\Tensor $input, array $weights): array
     {
-        $results = Linear::matvecMany($weights, $input->data());
+        $results = Linear::matvecMany(
+            $weights,
+            $input->payload() ?? $input->data(),
+            ToyBackend::enabled(),
+        );
         $tensors = [];
         foreach ($weights as $index => $weight) {
             $tensors[] = $this->graph->value(
@@ -210,19 +219,38 @@ final class Qwen35Model
             $swiGlu,
             $this->weight($prefix . '.ffn_down.weight'),
         );
-        $this->debug('ffn_gate-' . $layer, $gate->data());
-        $this->debug('ffn_up-' . $layer, $up->data());
-        $this->debug('ffn_swiglu-' . $layer, $swiGlu->data());
-        $this->debug('ffn_out-' . $layer, $ffn->data());
+        $this->debugGraph('ffn_gate-' . $layer, $gate);
+        $this->debugGraph('ffn_up-' . $layer, $up);
+        $this->debugGraph('ffn_swiglu-' . $layer, $swiGlu);
+        $this->debugGraph('ffn_out-' . $layer, $ffn);
 
         return $this->graph->add($residual, $ffn);
     }
 
-    private function rmsNorm(\Swow\Examples\Transformer\Graph\Tensor $input, array $weight, float $eps): \Swow\Examples\Transformer\Graph\Tensor
+    private function rmsNorm(\Swow\Examples\Transformer\Graph\Tensor $input, string $name, float $eps): \Swow\Examples\Transformer\Graph\Tensor
     {
-        $w = $this->graph->value('norm_weight', new Shape(count($weight)), $weight);
+        return $this->graph->rmsNorm($input, $this->normWeightTensor($name), $eps);
+    }
 
-        return $this->graph->rmsNorm($input, $w, $eps);
+    /**
+     * The graph tensor of a norm weight
+     *
+     * The packed weight is kept for the lifetime of the model, so a token only
+     * wraps it in a graph value and never converts it again
+     */
+    private function normWeightTensor(string $name): \Swow\Examples\Transformer\Graph\Tensor
+    {
+        $weight = $this->f32Tensor($name);
+        $shape = new Shape(count($weight));
+        if (!ToyBackend::enabled()) {
+            return $this->graph->value($name, $shape, $weight);
+        }
+
+        return $this->graph->value(
+            $name,
+            $shape,
+            $this->normWeightPayloads[$name] ??= ToyBackend::vector($weight, [$shape->count()]),
+        );
     }
 
     /** @return list<float> */
@@ -273,8 +301,7 @@ final class Qwen35Model
         return $this->f32Cache[$name] = array_values(unpack('g*', $raw));
     }
 
-    /** @return list<float> */
-    private function fullAttention(\Swow\Examples\Transformer\Graph\Tensor $input, int $layer, int $position): array
+    private function fullAttention(\Swow\Examples\Transformer\Graph\Tensor $input, int $layer, int $position): \Swow\Examples\Transformer\Graph\Tensor
     {
         $prefix = 'blk.' . $layer;
         [$qgTensor, $kTensor, $vTensor] = $this->linearMany($input, [
@@ -397,14 +424,13 @@ final class Qwen35Model
         $output = $this->graph->linear(
             $this->graph->value('attn_gated_' . $layer, new Shape($this->config->headCount * $headDim), $attention),
             $this->weight($prefix . '.attn_output.weight'),
-        )->data();
-        $this->debug('attn_output-' . $layer, $output);
+        );
+        $this->debugGraph('attn_output-' . $layer, $output);
 
         return $output;
     }
 
-    /** @return list<float> */
-    private function gatedDeltaNet(\Swow\Examples\Transformer\Graph\Tensor $input, int $layer, int $position): array
+    private function gatedDeltaNet(\Swow\Examples\Transformer\Graph\Tensor $input, int $layer, int $position): \Swow\Examples\Transformer\Graph\Tensor
     {
         $prefix = 'blk.' . $layer;
         [$qkvTensor, $zTensor, $betaTensor, $alphaTensor] = $this->linearMany($input, [
@@ -413,15 +439,16 @@ final class Qwen35Model
             $this->weight($prefix . '.ssm_beta.weight'),
             $this->weight($prefix . '.ssm_alpha.weight'),
         ]);
-        $qkv = $qkvTensor->data();
-        $z = $zTensor->data();
         $beta = $betaTensor->data();
         $alpha = $alphaTensor->data();
 
         $a = $this->f32Tensor($prefix . '.ssm_a');
         if ($this->hasToyGdn()) {
-            return $this->gatedDeltaNetToy($layer, $qkv, $z, $beta, $alpha, $a);
+            return $this->gatedDeltaNetToy($layer, $qkvTensor, $zTensor, $beta, $alpha, $a);
         }
+
+        $qkv = $qkvTensor->data();
+        $z = $zTensor->data();
 
         $dt = $this->f32Tensor($prefix . '.ssm_dt.bias');
         $g = [];
@@ -538,8 +565,8 @@ final class Qwen35Model
         $result = $this->graph->linear(
             $this->graph->value('gdn_out_' . $layer, new Shape($this->config->ssmInnerSize), $output),
             $this->weight($prefix . '.ssm_out.weight'),
-        )->data();
-        $this->debug('linear_attn_out-' . $layer, $result);
+        );
+        $this->debugGraph('linear_attn_out-' . $layer, $result);
 
         return $result;
     }
@@ -551,14 +578,11 @@ final class Qwen35Model
      * [heads, value_dim, key_dim], one key row per value column, and the conv
      * history as [convKernel, convDim]
      *
-     * @param list<float> $qkv
-     * @param list<float> $z
      * @param list<float> $beta
      * @param list<float> $alpha
      * @param list<float> $a
-     * @return list<float>
      */
-    private function gatedDeltaNetToy(int $layer, array $qkv, array $z, array $beta, array $alpha, array $a): array
+    private function gatedDeltaNetToy(int $layer, \Swow\Examples\Transformer\Graph\Tensor $qkv, \Swow\Examples\Transformer\Graph\Tensor $z, array $beta, array $alpha, array $a): \Swow\Examples\Transformer\Graph\Tensor
     {
         $prefix = 'blk.' . $layer;
         $heads = $this->config->ssmTimeStepRank;
@@ -584,12 +608,12 @@ final class Qwen35Model
         $this->debug('a_softplus-' . $layer, $alpha);
         $this->debug('gate-' . $layer, $g);
         $this->debug('beta_sigmoid-' . $layer, $beta);
-        $this->debug('z-' . $layer, $z);
+        $this->debugGraph('z-' . $layer, $z);
 
         /* The history holds the last convKernel inputs with the current step
          * in the last row, so one shift feeds the convolution */
         $history = $this->convHistory[$layer] ??= Tensor::zeros('f32', [$kernel, $convDim]);
-        shift_rows($history, ToyBackend::vector($qkv, [$convDim]), $history);
+        shift_rows($history, $qkv->toTensor(), $history);
         $conv = conv1d_silu(
             $this->constTensor($prefix . '.ssm_conv1d.weight', [$convDim, $kernel]),
             $history,
@@ -636,17 +660,17 @@ final class Qwen35Model
             $this->constTensor($prefix . '.ssm_norm.weight', [$valueDim]),
             $this->config->rmsEps,
         );
-        $output = ToyBackend::floats(mul(
+        $output = mul(
             $output->reshape([$innerSize]),
-            silu(ToyBackend::vector($z, [$innerSize])),
-        ));
+            silu($z->toTensor()),
+        );
+        $this->debugTensor('final_output-' . $layer, $output);
 
-        $this->debug('final_output-' . $layer, $output);
         $result = $this->graph->linear(
             $this->graph->value('gdn_out_' . $layer, new Shape($innerSize), $output),
             $this->weight($prefix . '.ssm_out.weight'),
-        )->data();
-        $this->debug('linear_attn_out-' . $layer, $result);
+        );
+        $this->debugGraph('linear_attn_out-' . $layer, $result);
 
         return $result;
     }
@@ -716,6 +740,14 @@ final class Qwen35Model
     {
         if ($this->debug !== null) {
             $this->debug($name, ToyBackend::floats($tensor));
+        }
+    }
+
+    /** Log the contents of a graph tensor, without unpacking it when debug is off */
+    private function debugGraph(string $name, \Swow\Examples\Transformer\Graph\Tensor $tensor): void
+    {
+        if ($this->debug !== null) {
+            $this->debug($name, $tensor->data());
         }
     }
 

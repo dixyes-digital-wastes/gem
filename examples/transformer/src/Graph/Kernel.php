@@ -19,7 +19,7 @@ interface Kernel
     /**
      * @param list<Tensor> $inputs
      * @param array<string, mixed> $attrs
-     * @return list<float>|list<int>
+     * @return list<float>|list<int>|\Toy\Tensor
      */
-    public function execute(array $inputs, array $attrs): array;
+    public function execute(array $inputs, array $attrs): array|object;
 }

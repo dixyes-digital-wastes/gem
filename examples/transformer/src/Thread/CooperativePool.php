@@ -93,7 +93,7 @@ final class CooperativePool implements Inferencer
         $this->control = new SharedBuffer(64);
         $this->outputA = new SharedBuffer(self::MAX_ROWS * 8);
         $this->outputB = new SharedBuffer(self::MAX_ROWS * 8);
-        $this->logits = new SharedBuffer($this->logitsRows * 8);
+        $this->logits = new SharedBuffer($this->logitsRows * 4);
         $this->exchange = new SharedBuffer(CooperativeContext::EXCHANGE_FLOATS * 8);
         $this->job = new Futex(0);
         $this->opBarrier = new CooperativeBarrier($this->threads);
@@ -112,7 +112,7 @@ final class CooperativePool implements Inferencer
     {
         $this->submit(self::COMMAND_FORWARD, $token, $position);
 
-        return $this->logits->viewF64(0, $this->logitsRows);
+        return $this->logits->viewF32(0, $this->logitsRows);
     }
 
     public function reset(): void

@@ -62,8 +62,8 @@ final class Graph
         return $tensor;
     }
 
-    /** @param list<float>|list<int> $data */
-    public function value(string $name, Shape $shape, array $data, string $dtype = DType::F32): Tensor
+    /** @param list<float>|list<int>|\Toy\Tensor $data */
+    public function value(string $name, Shape $shape, array|object $data, string $dtype = DType::F32): Tensor
     {
         return new Tensor(++$this->nextId, $name, $shape, $dtype, $data);
     }

@@ -25,16 +25,14 @@ use function Toy\Tensor\rmsnorm;
 
 final class RmsNormKernel implements Kernel
 {
-    public function execute(array $inputs, array $attrs): array
+    public function execute(array $inputs, array $attrs): array|object
     {
         [$input, $weight] = $inputs;
         $eps = (float) ($attrs['eps'] ?? 1e-6);
         if ($input->dtype() !== DType::F32 || $weight->dtype() !== DType::F32) {
             throw new GraphException('rms_norm requires f32 input and weight');
         }
-        $data = $input->data();
-        $weights = $weight->data();
-        if (count($data) !== count($weights)) {
+        if ($input->shape()->count() !== $weight->shape()->count()) {
             throw new GraphException('rms_norm shape mismatch');
         }
         if (
@@ -42,12 +40,14 @@ final class RmsNormKernel implements Kernel
             && count($input->shape()->dimensions()) === 1
             && count($weight->shape()->dimensions()) === 1
         ) {
-            return ToyBackend::floats(rmsnorm(
-                ToyBackend::vector($data, $input->shape()->dimensions()),
-                ToyBackend::vector($weights, $weight->shape()->dimensions()),
+            return rmsnorm(
+                $input->toTensor(),
+                $weight->toTensor(),
                 $eps,
-            ));
+            );
         }
+        $data = $input->data();
+        $weights = $weight->data();
         $square = 0.0;
         foreach ($data as $value) {
             $square += $value * $value;

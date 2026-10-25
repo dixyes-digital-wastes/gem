@@ -78,12 +78,16 @@ final class CooperativeWorker
                     if ($command === CooperativePool::COMMAND_RESET) {
                         $model->reset();
                     } else {
-                        $values = $model->forward(
+                        $values = $model->forwardTensor(
                             $control->viewI32(CooperativePool::OFFSET_TOKEN, 1)[0],
                             $control->viewI32(CooperativePool::OFFSET_POSITION, 1)[0],
                         );
                         if ($rank === 0) {
-                            $logits->writeF64(0, $values);
+                            if ($values->payload() === null) {
+                                $logits->writeF32(0, $values->data());
+                            } else {
+                                $logits->write(0, $values->toBytes());
+                            }
                         }
                     }
                 } catch (Throwable $e) {

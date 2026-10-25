@@ -23,11 +23,9 @@ use function Toy\Tensor\mul;
 
 final class MulKernel implements Kernel
 {
-    public function execute(array $inputs, array $attrs): array
+    public function execute(array $inputs, array $attrs): array|object
     {
         [$left, $right] = $inputs;
-        $leftData = $left->data();
-        $rightData = $right->data();
         $dimensions = $left->shape()->dimensions();
         if (
             ToyBackend::enabled()
@@ -35,11 +33,10 @@ final class MulKernel implements Kernel
             && $right->dtype() === DType::F32
             && count($dimensions) <= ToyBackend::MAX_RANK
         ) {
-            return ToyBackend::floats(mul(
-                ToyBackend::vector($leftData, $dimensions),
-                ToyBackend::vector($rightData, $dimensions),
-            ));
+            return mul($left->toTensor(), $right->toTensor());
         }
+        $leftData = $left->data();
+        $rightData = $right->data();
         $result = [];
         foreach ($leftData as $index => $value) {
             $result[] = $value * $rightData[$index];

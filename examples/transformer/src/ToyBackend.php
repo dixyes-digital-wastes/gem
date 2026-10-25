@@ -78,6 +78,7 @@ final class ToyBackend
      */
     public static function vector(array $values, array $shape): Tensor
     {
+
         return Tensor::fromBytes(self::F32_DTYPE, $shape, pack('g*', ...$values));
     }
 
@@ -93,6 +94,12 @@ final class ToyBackend
     public static function q8Activation(array $values, int $columns): Tensor
     {
         return quantize_q8_0(self::vector($values, [$columns]));
+    }
+
+    /** Build an f32 tensor from raw little endian bytes */
+    public static function fromBytes(string $bytes, array $shape): Tensor
+    {
+        return Tensor::fromBytes(self::F32_DTYPE, $shape, $bytes);
     }
 
     /** Return a q8_0 vector tensor from the bytes of Q8_0::quantize() */
