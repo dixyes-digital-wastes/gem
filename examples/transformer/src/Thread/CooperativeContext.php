@@ -40,7 +40,7 @@ final class CooperativeContext
         public SharedBuffer $outputB,
         public SharedBuffer $logits,
         public SharedBuffer $control,
-        public ThreadBarrier $opBarrier,
+        public CooperativeBarrier $opBarrier,
         public ThreadBarrier $tokenBarrier,
     ) {
     }

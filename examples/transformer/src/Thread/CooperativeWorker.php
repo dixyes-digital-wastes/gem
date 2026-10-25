@@ -38,7 +38,7 @@ final class CooperativeWorker
         SharedBuffer $outputB,
         SharedBuffer $logits,
         Futex $job,
-        ThreadBarrier $opBarrier,
+        CooperativeBarrier $opBarrier,
         ThreadBarrier $tokenBarrier,
     ): void {
         if ($cpu !== null) {

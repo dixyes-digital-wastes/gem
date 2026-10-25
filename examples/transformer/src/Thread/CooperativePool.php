@@ -62,7 +62,7 @@ final class CooperativePool implements Inferencer
 
     private Futex $job;
 
-    private ThreadBarrier $opBarrier;
+    private CooperativeBarrier $opBarrier;
 
     private ThreadBarrier $tokenBarrier;
 
@@ -93,7 +93,7 @@ final class CooperativePool implements Inferencer
         $this->outputB = new SharedBuffer(self::MAX_ROWS * 8);
         $this->logits = new SharedBuffer($this->logitsRows * 8);
         $this->job = new Futex(0);
-        $this->opBarrier = new ThreadBarrier($this->threads);
+        $this->opBarrier = new CooperativeBarrier($this->threads);
         $this->tokenBarrier = new ThreadBarrier($this->threads + 1);
 
         $this->start();
