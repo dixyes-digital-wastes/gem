@@ -22,7 +22,9 @@ use Swow\Examples\Transformer\Graph\Weight;
 use Swow\Examples\Transformer\ToyBackend;
 
 use function array_map;
+use function array_push;
 use function intdiv;
+use function min;
 use function Toy\Tensor\matvec_f32;
 use function Toy\Tensor\matvec_q8_0_q8_0;
 
@@ -130,29 +132,40 @@ final class Linear
             return [];
         }
         $columns = $weight->columns();
-        if ($weight->type() === Weight::Q8_0) {
-            $tensor = ToyBackend::q8LinearWeight($weight, $begin, $end);
-            if ($tensor !== null) {
-                return ToyBackend::floats(matvec_q8_0_q8_0(
-                    $tensor,
-                    ToyBackend::q8Vector(Q8_0::quantize($input), $columns),
-                    $rows,
-                    $columns,
-                ));
-            }
-        } else {
-            $tensor = ToyBackend::linearWeight($weight, $begin, $end);
-            if ($tensor !== null) {
-                return ToyBackend::floats(matvec_f32(
-                    $tensor,
-                    ToyBackend::vector($input, [$columns]),
-                    $rows,
-                    $columns,
-                ));
-            }
+        $q8 = $weight->type() === Weight::Q8_0;
+        if (!$q8 && $weight->type() !== Weight::F32) {
+            return self::compute($weight->slice($begin, $end), $weight->type(), $input, $rows, $columns);
         }
 
-        return self::compute($weight->slice($begin, $end), $weight->type(), $input, $rows, $columns);
+        /* A generated kernel rejects more than MAX_KERNEL_ROWS rows, so a wide
+         * range runs as ordered chunks instead of one scalar fallback. The
+         * activation is quantized once and every chunk reads the same vector */
+        $operand = null;
+        $values = [];
+        for ($start = $begin; $start < $end; $start += ToyBackend::MAX_KERNEL_ROWS) {
+            $stop = min($end, $start + ToyBackend::MAX_KERNEL_ROWS);
+            $chunkRows = $stop - $start;
+            if ($q8) {
+                $tensor = ToyBackend::q8LinearWeight($weight, $start, $stop);
+                if ($tensor === null) {
+                    return self::compute($weight->slice($begin, $end), Weight::Q8_0, $input, $rows, $columns);
+                }
+                $operand ??= ToyBackend::has('quantize_q8_0')
+                    ? ToyBackend::q8Activation($input, $columns)
+                    : ToyBackend::q8Vector(Q8_0::quantize($input), $columns);
+                $chunk = matvec_q8_0_q8_0($tensor, $operand, $chunkRows, $columns);
+            } else {
+                $tensor = ToyBackend::linearWeight($weight, $start, $stop);
+                if ($tensor === null) {
+                    return self::compute($weight->slice($begin, $end), Weight::F32, $input, $rows, $columns);
+                }
+                $operand ??= ToyBackend::vector($input, [$columns]);
+                $chunk = matvec_f32($tensor, $operand, $chunkRows, $columns);
+            }
+            array_push($values, ...ToyBackend::floats($chunk));
+        }
+
+        return $values;
     }
 
     /**

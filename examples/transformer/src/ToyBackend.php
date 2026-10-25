@@ -21,7 +21,9 @@ use WeakMap;
 use function array_values;
 use function class_exists;
 use function extension_loaded;
+use function function_exists;
 use function pack;
+use function Toy\Tensor\quantize_q8_0;
 use function unpack;
 
 /*
@@ -35,6 +37,10 @@ final class ToyBackend
 {
     public const MAX_RANK = 4;
 
+    /* A generated kernel rejects a row count above 65535 and the call falls
+     * back to the scalar path, so a wider range runs as row chunks */
+    public const MAX_KERNEL_ROWS = 65_535;
+
     private const F32_DTYPE = 'f32';
 
     private const Q8_DTYPE = 'q8_0';
@@ -47,6 +53,9 @@ final class ToyBackend
 
     private static ?bool $enabled = null;
 
+    /** @var array<string, bool> */
+    private static array $operators = [];
+
     private function __construct()
     {
     }
@@ -56,6 +65,13 @@ final class ToyBackend
         return self::$enabled ??= extension_loaded('toy') && class_exists('Toy\\Tensor');
     }
 
+    /** True when the loaded extension provides the named operator */
+    public static function has(string $operator): bool
+    {
+        return self::$operators[$operator] ??= self::enabled()
+            && function_exists('Toy\\Tensor\\' . $operator);
+    }
+
     /**
      * @param list<float>|list<int> $values
      * @param list<int> $shape
@@ -63,6 +79,20 @@ final class ToyBackend
     public static function vector(array $values, array $shape): Tensor
     {
         return Tensor::fromBytes(self::F32_DTYPE, $shape, pack('g*', ...$values));
+    }
+
+    /**
+     * Quantize an f32 activation row in the extension
+     *
+     * The extension follows ggml: it divides by the f16 rounded scale and
+     * clamps to the int8 range, while Q8_0::quantize() divides by the f32
+     * scale in double and keeps -128, so a code can differ by one
+     *
+     * @param list<float> $values
+     */
+    public static function q8Activation(array $values, int $columns): Tensor
+    {
+        return quantize_q8_0(self::vector($values, [$columns]));
     }
 
     /** Return a q8_0 vector tensor from the bytes of Q8_0::quantize() */
