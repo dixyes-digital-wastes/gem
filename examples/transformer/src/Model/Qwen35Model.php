@@ -24,17 +24,31 @@ use Swow\Examples\Transformer\Graph\Shape;
 use Swow\Examples\Transformer\Graph\Weight;
 use Swow\Examples\Transformer\Thread\CooperativeContext;
 use Swow\Examples\Transformer\Thread\Linear;
+use Swow\Examples\Transformer\ToyBackend;
+use Toy\Tensor;
 
 use function array_fill;
 use function array_slice;
 use function array_values;
 use function count;
 use function exp;
+use function implode;
 use function intdiv;
 use function log1p;
 use function max;
 use function sin;
 use function sqrt;
+use function substr;
+use function Toy\Tensor\add;
+use function Toy\Tensor\conv1d_silu;
+use function Toy\Tensor\gdn_recurrence;
+use function Toy\Tensor\l2norm_rows;
+use function Toy\Tensor\mul;
+use function Toy\Tensor\rmsnorm_rows;
+use function Toy\Tensor\shift_rows;
+use function Toy\Tensor\sigmoid;
+use function Toy\Tensor\silu;
+use function Toy\Tensor\softplus;
 use function unpack;
 
 final class Qwen35Model
@@ -57,6 +71,15 @@ final class Qwen35Model
 
     /** @var array<int, list<float>> */
     private array $ssmState = [];
+
+    /** @var array<int, Tensor> */
+    private array $convHistory = [];
+
+    /** @var array<int, Tensor> */
+    private array $ssmStateTensor = [];
+
+    /** @var array<string, Tensor> */
+    private array $constTensors = [];
 
     /** @var array<int, float> */
     private array $ropeInverse = [];
@@ -91,6 +114,8 @@ final class Qwen35Model
         $this->vCache = [];
         $this->convState = [];
         $this->ssmState = [];
+        $this->convHistory = [];
+        $this->ssmStateTensor = [];
         $this->graph = new Graph();
     }
 
@@ -272,15 +297,28 @@ final class Qwen35Model
             $gate = [...$gate, ...array_slice($qg, $base + $headDim, $headDim)];
         }
 
-        $qNorm = $this->f32Tensor($prefix . '.attn_q_norm.weight');
-        $kNorm = $this->f32Tensor($prefix . '.attn_k_norm.weight');
-        for ($head = 0; $head < $this->config->headCount; $head++) {
-            $part = $this->rmsNormVector(array_slice($q, $head * $headDim, $headDim), $qNorm, $this->config->rmsEps);
-            array_splice($q, $head * $headDim, $headDim, $part);
-        }
-        for ($head = 0; $head < $this->config->headCountKv; $head++) {
-            $part = $this->rmsNormVector(array_slice($k, $head * $headDim, $headDim), $kNorm, $this->config->rmsEps);
-            array_splice($k, $head * $headDim, $headDim, $part);
+        if (ToyBackend::has('rmsnorm_rows')) {
+            $q = ToyBackend::floats(rmsnorm_rows(
+                ToyBackend::vector($q, [$this->config->headCount, $headDim]),
+                $this->constTensor($prefix . '.attn_q_norm.weight', [$headDim]),
+                $this->config->rmsEps,
+            ));
+            $k = ToyBackend::floats(rmsnorm_rows(
+                ToyBackend::vector($k, [$this->config->headCountKv, $headDim]),
+                $this->constTensor($prefix . '.attn_k_norm.weight', [$headDim]),
+                $this->config->rmsEps,
+            ));
+        } else {
+            $qNorm = $this->f32Tensor($prefix . '.attn_q_norm.weight');
+            $kNorm = $this->f32Tensor($prefix . '.attn_k_norm.weight');
+            for ($head = 0; $head < $this->config->headCount; $head++) {
+                $part = $this->rmsNormVector(array_slice($q, $head * $headDim, $headDim), $qNorm, $this->config->rmsEps);
+                array_splice($q, $head * $headDim, $headDim, $part);
+            }
+            for ($head = 0; $head < $this->config->headCountKv; $head++) {
+                $part = $this->rmsNormVector(array_slice($k, $head * $headDim, $headDim), $kNorm, $this->config->rmsEps);
+                array_splice($k, $head * $headDim, $headDim, $part);
+            }
         }
 
         $this->debug('Qcur_normed-' . $layer, $q);
@@ -296,6 +334,16 @@ final class Qwen35Model
 
         $headsPerKv = intdiv($this->config->headCount, $this->config->headCountKv);
         $scale = 1.0 / sqrt((float) $headDim);
+        if (ToyBackend::has('sigmoid')) {
+            $gateSigmoid = ToyBackend::floats(sigmoid(
+                ToyBackend::vector($gate, [$this->config->headCount * $headDim]),
+            ));
+        } else {
+            $gateSigmoid = [];
+            foreach ($gate as $value) {
+                $gateSigmoid[] = $this->sigmoid($value);
+            }
+        }
         $attention = [];
         $pregate = [];
         for ($head = 0; $head < $this->config->headCount; $head++) {
@@ -323,7 +371,7 @@ final class Qwen35Model
                     $value += $scores[$step] / $sum * $this->vCache[$layer][$step][$kvHead * $headDim + $dim];
                 }
                 $pregate[$head * $headDim + $dim] = $value;
-                $attention[$head * $headDim + $dim] = $value * $this->sigmoid($gate[$head * $headDim + $dim]);
+                $attention[$head * $headDim + $dim] = $value * $gateSigmoid[$head * $headDim + $dim];
             }
         }
         $this->debug('attn_pregate-' . $layer, $pregate);
@@ -353,8 +401,12 @@ final class Qwen35Model
         $beta = $betaTensor->data();
         $alpha = $alphaTensor->data();
 
-        $dt = $this->f32Tensor($prefix . '.ssm_dt.bias');
         $a = $this->f32Tensor($prefix . '.ssm_a');
+        if ($this->hasToyGdn()) {
+            return $this->gatedDeltaNetToy($layer, $qkv, $z, $beta, $alpha, $a);
+        }
+
+        $dt = $this->f32Tensor($prefix . '.ssm_dt.bias');
         $g = [];
         for ($head = 0; $head < $this->config->ssmTimeStepRank; $head++) {
             $beta[$head] = $this->sigmoid($beta[$head]);
@@ -475,6 +527,113 @@ final class Qwen35Model
         return $result;
     }
 
+    /**
+     * Gated delta net through the toy kernels
+     *
+     * The recurrence keeps its state in the extension as
+     * [heads, value_dim, key_dim], one key row per value column, and the conv
+     * history as [convKernel, convDim]
+     *
+     * @param list<float> $qkv
+     * @param list<float> $z
+     * @param list<float> $beta
+     * @param list<float> $alpha
+     * @param list<float> $a
+     * @return list<float>
+     */
+    private function gatedDeltaNetToy(int $layer, array $qkv, array $z, array $beta, array $alpha, array $a): array
+    {
+        $prefix = 'blk.' . $layer;
+        $heads = $this->config->ssmTimeStepRank;
+        $groupCount = $this->config->ssmGroupCount;
+        $keyDim = $this->config->keyDim();
+        $valueDim = $this->config->valueDim();
+        $innerSize = $this->config->ssmInnerSize;
+        $convDim = $innerSize + 2 * $groupCount * $this->config->ssmStateSize;
+        $kernel = $this->config->convKernel;
+
+        $betaTensor = sigmoid(ToyBackend::vector($beta, [$heads]));
+        $beta = ToyBackend::floats($betaTensor);
+        $alpha = ToyBackend::floats(softplus(add(
+            ToyBackend::vector($alpha, [$heads]),
+            $this->constTensor($prefix . '.ssm_dt.bias', [$heads]),
+        )));
+        $g = [];
+        $decay = [];
+        for ($head = 0; $head < $heads; $head++) {
+            $g[$head] = $alpha[$head] * $a[$head];
+            $decay[$head] = exp($g[$head]);
+        }
+        $this->debug('a_softplus-' . $layer, $alpha);
+        $this->debug('gate-' . $layer, $g);
+        $this->debug('beta_sigmoid-' . $layer, $beta);
+        $this->debug('z-' . $layer, $z);
+
+        /* The history holds the last convKernel inputs with the current step
+         * in the last row, so one shift feeds the convolution */
+        $history = $this->convHistory[$layer] ??= Tensor::zeros('f32', [$kernel, $convDim]);
+        shift_rows($history, ToyBackend::vector($qkv, [$convDim]), $history);
+        $conv = conv1d_silu(
+            $this->constTensor($prefix . '.ssm_conv1d.weight', [$convDim, $kernel]),
+            $history,
+            $convDim,
+            $kernel,
+        );
+        $this->debugTensor('conv_output_silu-' . $layer, $conv);
+
+        /* The heads of the recurrence are the first ones of the projection */
+        $bytes = $conv->toBytes();
+        $headBytes = $heads * $keyDim * 4;
+        $q = l2norm_rows(
+            Tensor::fromBytes('f32', [$heads, $keyDim], substr($bytes, 0, $headBytes)),
+            $this->config->rmsEps,
+        );
+        $k = l2norm_rows(
+            Tensor::fromBytes('f32', [$heads, $keyDim], substr($bytes, $groupCount * $keyDim * 4, $headBytes)),
+            $this->config->rmsEps,
+        );
+        $v = Tensor::fromBytes(
+            'f32',
+            [$heads, $valueDim],
+            substr($bytes, 2 * $groupCount * $keyDim * 4, $heads * $valueDim * 4),
+        );
+        $this->debugTensor('q_conv_predelta-' . $layer, $q);
+        $this->debugTensor('k_conv_predelta-' . $layer, $k);
+
+        $state = $this->ssmStateTensor[$layer] ??= Tensor::zeros('f32', [$heads, $valueDim, $keyDim]);
+        $output = gdn_recurrence(
+            $q,
+            $k,
+            $v,
+            ToyBackend::vector($decay, [$heads]),
+            $betaTensor,
+            $state,
+            0,
+            $heads,
+            0,
+            $valueDim,
+            1.0 / sqrt((float) $keyDim),
+        );
+        $output = rmsnorm_rows(
+            $output,
+            $this->constTensor($prefix . '.ssm_norm.weight', [$valueDim]),
+            $this->config->rmsEps,
+        );
+        $output = ToyBackend::floats(mul(
+            $output->reshape([$innerSize]),
+            silu(ToyBackend::vector($z, [$innerSize])),
+        ));
+
+        $this->debug('final_output-' . $layer, $output);
+        $result = $this->graph->linear(
+            $this->graph->value('gdn_out_' . $layer, new Shape($innerSize), $output),
+            $this->weight($prefix . '.ssm_out.weight'),
+        )->data();
+        $this->debug('linear_attn_out-' . $layer, $result);
+
+        return $result;
+    }
+
     /** @param list<float> $values */
     private function applyRope(array &$values, int $heads, int $position): void
     {
@@ -533,6 +692,37 @@ final class Qwen35Model
         if ($this->debug !== null) {
             ($this->debug)($name, $data);
         }
+    }
+
+    /** Log the contents of a tensor, without unpacking it when debug is off */
+    private function debugTensor(string $name, Tensor $tensor): void
+    {
+        if ($this->debug !== null) {
+            $this->debug($name, ToyBackend::floats($tensor));
+        }
+    }
+
+    private function hasToyGdn(): bool
+    {
+        return ToyBackend::has('gdn_recurrence')
+            && ToyBackend::has('conv1d_silu')
+            && ToyBackend::has('shift_rows')
+            && ToyBackend::has('l2norm_rows')
+            && ToyBackend::has('rmsnorm_rows')
+            && ToyBackend::has('sigmoid')
+            && ToyBackend::has('softplus');
+    }
+
+    /**
+     * Return the f32 tensor of an f32 weight, cached for the model
+     *
+     * @param list<int> $shape
+     */
+    private function constTensor(string $name, array $shape): Tensor
+    {
+        $key = $name . ':' . implode('x', $shape);
+
+        return $this->constTensors[$key] ??= ToyBackend::vector($this->f32Tensor($name), $shape);
     }
 
     private function sigmoid(float $value): float
