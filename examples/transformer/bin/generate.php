@@ -29,7 +29,7 @@ if ($argc < 3) {
     fwrite(STDERR, "  --ids=100,101       run raw token ids instead of a prompt\n");
     fwrite(STDERR, "  --tokens=N          max generated tokens, default 8; 0 only forwards\n");
     fwrite(STDERR, "  --output=PREFIX     save logits as PREFIX_logits_NN.bin\n");
-    fwrite(STDERR, "  --threads=N         worker threads, default physical cores\n");
+    fwrite(STDERR, "  --threads=N         worker threads, default 4, 8 for throughput\n");
     fwrite(STDERR, "  --no-pin            disable CPU pinning\n");
     fwrite(STDERR, "  --greedy            greedy sampling\n");
     fwrite(STDERR, "  --temp=N --top-k=N --top-p=N --min-p=N --seed=N\n");

@@ -33,7 +33,7 @@ if ($argc < 2) {
     fwrite(STDERR, "  --no-system       disable the system message\n");
     fwrite(STDERR, "  --thinking        enable Qwen thinking prompt\n");
     fwrite(STDERR, "  --greedy          greedy sampling\n");
-    fwrite(STDERR, "  --threads=N       inference threads, default physical cores\n");
+    fwrite(STDERR, "  --threads=N       inference threads, default 4, 8 for throughput\n");
     fwrite(STDERR, "  --no-pin          disable physical-core pinning\n");
     fwrite(STDERR, "  --plain           use a line-based prompt instead of the TUI\n");
     fwrite(STDERR, "  --temp=N --top-k=N --top-p=N --min-p=N --seed=N\n");

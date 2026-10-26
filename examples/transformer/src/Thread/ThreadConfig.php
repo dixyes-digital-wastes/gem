@@ -22,6 +22,7 @@ use function array_fill;
 use function array_slice;
 use function class_exists;
 use function count;
+use function min;
 
 final class ThreadConfig
 {
@@ -55,7 +56,7 @@ final class ThreadConfig
             return 1;
         }
         try {
-            return max(1, count(CpuAffinity::physicalCpus('auto')));
+            return min(4, max(1, count(CpuAffinity::physicalCpus('auto'))));
         } catch (Throwable) {
             return 1;
         }

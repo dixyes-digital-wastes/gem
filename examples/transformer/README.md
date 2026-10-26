@@ -298,12 +298,17 @@ tests from slow model inference.
 ## Inference demos
 
 ```bash
-php examples/transformer/bin/generate.php <model.gguf> --prompt=hi --tokens=9 --threads=8
+php examples/transformer/bin/generate.php <model.gguf> --prompt=hi --tokens=9
 php examples/transformer/bin/chat.php <model.gguf> --threads=8
 ```
 
 `generate.php` is the forward demo and prints per-token timings. `chat.php` is
 the interactive TUI.
+
+Both demos default to 4 worker threads. Eight threads decode a few percent
+faster when eight cores are free, so 8 is the recommended throughput option.
+Wider pools stay correct but spend more time on barrier latency than they win,
+so 24 threads only serves the correctness tests.
 
 Workers run the whole forward and synchronize through shared memory, a futex,
 and barriers. The parent only submits a token and waits for the result.
