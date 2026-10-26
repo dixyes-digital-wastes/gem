@@ -210,7 +210,20 @@ C, 'kernel32.dll');
                 continue;
             }
             $buffer .= $char;
-            $this->write($char);
+            /*
+             * A UTF-8 console rejects a partial multibyte sequence. Echo only
+             * after the bytes received so far form one complete character
+             */
+            $length = strlen($buffer);
+            $start = $length - 1;
+            while ($start > 0 && (ord($buffer[$start]) & 0xC0) === 0x80) {
+                $start--;
+            }
+            $lead = ord($buffer[$start]);
+            $need = $lead >= 0xF0 ? 4 : ($lead >= 0xE0 ? 3 : ($lead >= 0xC0 ? 2 : 1));
+            if ($length - $start >= $need) {
+                $this->write(substr($buffer, $start, $need));
+            }
         }
     }
 
