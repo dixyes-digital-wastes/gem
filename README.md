@@ -2,8 +2,7 @@
 
 PHP matrix kernels and GGUF transformer inference.
 
-The package targets PHP 8.4 or later. Three optional extensions provide the
-runtime paths:
+The package targets PHP 8.4 or later. Three optional extensions provide the runtime paths:
 
 - `ext-swow` runs inference workers on cooperative threads.
 - `ext-toy` accelerates matrix kernels with native code.
@@ -25,8 +24,7 @@ For a source checkout, install the dependencies:
 composer install
 ```
 
-The commands in this README use `php bin/...` from a source checkout. An
-installed project runs the three main entry points from `vendor/bin`.
+The commands in this README use `php bin/...` from a source checkout. An installed project runs the three main entry points from `vendor/bin`.
 
 ## Layout
 
@@ -40,16 +38,13 @@ tools/      model download helper
 
 ## Models
 
-This package uses Qwen3.5-0.8B in Q8_0 or F32 format. Git ignores the model
-files. Download them with the package tool:
+This package uses Qwen3.5-0.8B in Q8_0 or F32 format. Git ignores the model files. Download them with the package tool:
 
 ```bash
 php tools/download-models.php download --quant=q8
 ```
 
-The default output directory is `models/qwen3.5-0.8b`. The downloader requires
-the curl extension. It writes a `.part` file, checks the size and the SHA-256
-digest, and resumes an interrupted transfer.
+The default output directory is `models/qwen3.5-0.8b`. The downloader requires the curl extension. It writes a `.part` file, checks the size and the SHA-256 digest, and resumes an interrupted transfer.
 
 `bin/model.php` offers the same downloader together with metadata inspection:
 
@@ -76,10 +71,7 @@ Download options:
 php bin/generate.php models/qwen3.5-0.8b/Qwen3.5-0.8B.Q8_0.gguf --prompt="Hello"
 ```
 
-The generator defaults to four worker threads. Eight threads decode a few percent
-faster when eight cores are free, so 8 is the throughput option. Wider pools
-stay correct but spend more time on barrier latency than they gain; 24 threads
-only serves the correctness tests.
+The generator defaults to four worker threads. Eight threads decode a few percent faster when eight cores are free, so 8 is the throughput option. Wider pools stay correct but spend more time on barrier latency than they gain; 24 threads only serves the correctness tests.
 
 Options:
 
@@ -127,9 +119,7 @@ php bin/bench.php
 php bin/bench.php 512 8
 ```
 
-The benchmark runs the Q8_0 GEMV decode shape and the square GEMM with the
-selected thread count. `--efficiency` adds a single-thread GEMM pass and
-reports the speedup.
+The benchmark runs the Q8_0 GEMV decode shape and the square GEMM with the selected thread count. `--efficiency` adds a single-thread GEMM pass and reports the speedup.
 
 The matrix kernels also have focused entry points:
 
@@ -139,8 +129,7 @@ php bin/gemm.php 512 8 --efficiency
 php bin/gemv.php f32 --pin=auto
 ```
 
-`bin/gemv.php` measures `f32`, `q4_0`, and `q8_0` matvec. `bin/gemm.php`
-measures the square f32 GEMM. Both print the PHP, JIT, and CPU configuration.
+`bin/gemv.php` measures `f32`, `q4_0`, and `q8_0` matvec. `bin/gemm.php` measures the square f32 GEMM. Both print the PHP, JIT, and CPU configuration.
 
 ## Inspect
 
@@ -164,8 +153,7 @@ Run the test suite with PHPUnit:
 composer test
 ```
 
-Tests that need model files skip when the files are absent. External reference
-dumps can be supplied through the environment:
+Tests that need model files skip when the files are absent. External reference dumps can be supplied through the environment:
 
 ```text
 GEM_GEMM_VECTORS    vector dump for the graph reference tests
