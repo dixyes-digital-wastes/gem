@@ -105,17 +105,17 @@ final class Linear
                 $end,
                 $input,
                 $asTensor,
-                ToyBackend::enabled()
-                    ? ($operands[$columns . ':' . $weight->type()] ??= self::operand(
+                $begin === $end || !ToyBackend::enabled()
+                    ? null
+                    : ($operands[$columns . ':' . $weight->type()] ??= self::operand(
                         $input,
                         $columns,
                         $weight->type() === Weight::Q8_0,
-                    ))
-                    : null,
+                    )),
             );
             if ($values instanceof Tensor) {
                 $buffer->write($offset + $begin * 4, $values->toBytes());
-            } else {
+            } elseif ($values !== []) {
                 $buffer->writeF64($offset + $begin * 8, $values);
             }
             $ranges[] = [$offset, $rows];
@@ -175,7 +175,9 @@ final class Linear
     {
         $rows = $end - $begin;
         if ($rows === 0) {
-            return $asTensor ? ToyBackend::fromBytes('', [$rows]) : [];
+            /* A pool larger than the row count leaves some workers empty; they
+             * skip the op and only join the barrier */
+            return [];
         }
         $columns = $weight->columns();
         $q8 = $weight->type() === Weight::Q8_0;
