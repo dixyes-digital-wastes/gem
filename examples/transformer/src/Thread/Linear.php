@@ -66,8 +66,23 @@ final class Linear
         $context = CooperativeContext::current();
         if ($context === null || !self::canSplit($weights) || self::work($weights) < self::MIN_PARALLEL_WORK) {
             $result = [];
+            $operands = [];
             foreach ($weights as $weight) {
-                $result[] = self::computeRange($weight, 0, $weight->rows(), $input, $asTensor);
+                $columns = $weight->columns();
+                $result[] = self::computeRange(
+                    $weight,
+                    0,
+                    $weight->rows(),
+                    $input,
+                    $asTensor,
+                    ToyBackend::enabled()
+                        ? ($operands[$columns . ':' . $weight->type()] ??= self::operand(
+                            $input,
+                            $columns,
+                            $weight->type() === Weight::Q8_0,
+                        ))
+                        : null,
+                );
             }
 
             return $result;
@@ -78,12 +93,26 @@ final class Linear
         $buffer = $context->outputBuffer($context->opIndex());
         $offset = 0;
         $ranges = [];
+        $operands = [];
         foreach ($weights as $weight) {
             $rows = $weight->rows();
             $columns = $weight->columns();
             $begin = intdiv($rows * $context->rank, $context->threads);
             $end = intdiv($rows * ($context->rank + 1), $context->threads);
-            $values = self::computeRange($weight, $begin, $end, $input, $asTensor);
+            $values = self::computeRange(
+                $weight,
+                $begin,
+                $end,
+                $input,
+                $asTensor,
+                ToyBackend::enabled()
+                    ? ($operands[$columns . ':' . $weight->type()] ??= self::operand(
+                        $input,
+                        $columns,
+                        $weight->type() === Weight::Q8_0,
+                    ))
+                    : null,
+            );
             if ($values instanceof Tensor) {
                 $buffer->write($offset + $begin * 4, $values->toBytes());
             } else {
@@ -135,7 +164,14 @@ final class Linear
      * @param list<float>|Tensor $input
      * @return list<float>|Tensor
      */
-    private static function computeRange(Weight $weight, int $begin, int $end, array|object $input, bool $asTensor): array|object
+    private static function computeRange(
+        Weight $weight,
+        int $begin,
+        int $end,
+        array|object $input,
+        bool $asTensor,
+        ?Tensor $operand = null,
+    ): array|object
     {
         $rows = $end - $begin;
         if ($rows === 0) {
@@ -150,7 +186,6 @@ final class Linear
         /* A generated kernel rejects more than MAX_KERNEL_ROWS rows, so a wide
          * range runs as ordered chunks instead of one scalar fallback. The
          * activation is quantized once and every chunk reads the same vector */
-        $operand = null;
         $values = [];
         $bytes = '';
         for ($start = $begin; $start < $end; $start += ToyBackend::MAX_KERNEL_ROWS) {

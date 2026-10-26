@@ -95,6 +95,7 @@ final class Qwen35Model
     /** @var callable|null */
     private $debug;
 
+
     public function __construct(private GgufFile $file)
     {
         $this->config = Qwen35Config::fromMetadata($file->metadata());
@@ -610,47 +611,93 @@ final class Qwen35Model
         $this->debug('beta_sigmoid-' . $layer, $beta);
         $this->debugGraph('z-' . $layer, $z);
 
+        /* A head owns its conv channels and its recurrence rows, so a worker
+         * takes a head range and the conv, the norm and the recurrence of that
+         * range, then the gated rows travel through the exchange buffer */
+        $context = CooperativeContext::current();
+        $split = $context !== null
+            && $context->threads > 1
+            && $heads >= 2 * $context->threads
+            && $innerSize <= CooperativeContext::EXCHANGE_FLOATS;
+        [$headBegin, $headEnd] = $split ? $context->range($heads) : [0, $heads];
+        $workerHeads = $headEnd - $headBegin;
+
         /* The history holds the last convKernel inputs with the current step
          * in the last row, so one shift feeds the convolution */
         $history = $this->convHistory[$layer] ??= Tensor::zeros('f32', [$kernel, $convDim]);
         shift_rows($history, $qkv->toTensor(), $history);
-        $conv = conv1d_silu(
-            $this->constTensor($prefix . '.ssm_conv1d.weight', [$convDim, $kernel]),
-            $history,
-            $convDim,
-            $kernel,
-        );
+        $convWeight = $this->constTensor($prefix . '.ssm_conv1d.weight', [$convDim, $kernel]);
+        if ($split) {
+            $conv = Tensor::zeros('f32', [$convDim]);
+            conv1d_silu(
+                $convWeight,
+                $history,
+                $convDim,
+                $kernel,
+                $headBegin * $keyDim,
+                $workerHeads * $keyDim,
+                $conv,
+            );
+            conv1d_silu(
+                $convWeight,
+                $history,
+                $convDim,
+                $kernel,
+                $groupCount * $keyDim + $headBegin * $keyDim,
+                $workerHeads * $keyDim,
+                $conv,
+            );
+            conv1d_silu(
+                $convWeight,
+                $history,
+                $convDim,
+                $kernel,
+                2 * $groupCount * $keyDim + $headBegin * $valueDim,
+                $workerHeads * $valueDim,
+                $conv,
+            );
+        } else {
+            $conv = conv1d_silu($convWeight, $history, $convDim, $kernel);
+        }
         $this->debugTensor('conv_output_silu-' . $layer, $conv);
 
-        /* The heads of the recurrence are the first ones of the projection */
         $bytes = $conv->toBytes();
-        $headBytes = $heads * $keyDim * 4;
         $q = l2norm_rows(
-            Tensor::fromBytes('f32', [$heads, $keyDim], substr($bytes, 0, $headBytes)),
+            ToyBackend::fromBytes(
+                substr($bytes, $headBegin * $keyDim * 4, $workerHeads * $keyDim * 4),
+                [$workerHeads, $keyDim],
+            ),
             $this->config->rmsEps,
         );
         $k = l2norm_rows(
-            Tensor::fromBytes('f32', [$heads, $keyDim], substr($bytes, $groupCount * $keyDim * 4, $headBytes)),
+            ToyBackend::fromBytes(
+                substr($bytes, ($groupCount * $keyDim + $headBegin * $keyDim) * 4, $workerHeads * $keyDim * 4),
+                [$workerHeads, $keyDim],
+            ),
             $this->config->rmsEps,
         );
-        $v = Tensor::fromBytes(
-            'f32',
-            [$heads, $valueDim],
-            substr($bytes, 2 * $groupCount * $keyDim * 4, $heads * $valueDim * 4),
+        $v = ToyBackend::fromBytes(
+            substr(
+                $bytes,
+                (2 * $groupCount * $keyDim + $headBegin * $valueDim) * 4,
+                $workerHeads * $valueDim * 4,
+            ),
+            [$workerHeads, $valueDim],
         );
         $this->debugTensor('q_conv_predelta-' . $layer, $q);
         $this->debugTensor('k_conv_predelta-' . $layer, $k);
 
-        $state = $this->ssmStateTensor[$layer] ??= Tensor::zeros('f32', [$heads, $valueDim, $keyDim]);
+        $state = $this->ssmStateTensor[$layer] ??= Tensor::zeros('f32', [$workerHeads, $valueDim, $keyDim]);
+
         $output = gdn_recurrence(
             $q,
             $k,
             $v,
-            ToyBackend::vector($decay, [$heads]),
-            $betaTensor,
+            ToyBackend::vector(array_slice($decay, $headBegin, $workerHeads), [$workerHeads]),
+            ToyBackend::vector(array_slice($beta, $headBegin, $workerHeads), [$workerHeads]),
             $state,
             0,
-            $heads,
+            $workerHeads,
             0,
             $valueDim,
             1.0 / sqrt((float) $keyDim),
@@ -661,9 +708,19 @@ final class Qwen35Model
             $this->config->rmsEps,
         );
         $output = mul(
-            $output->reshape([$innerSize]),
-            silu($z->toTensor()),
+            $output->reshape([$workerHeads * $valueDim]),
+            silu(ToyBackend::fromBytes(
+                substr($z->toBytes(), $headBegin * $valueDim * 4, $workerHeads * $valueDim * 4),
+                [$workerHeads * $valueDim],
+            )),
         );
+        if ($split) {
+            $context->exchange->write($headBegin * $valueDim * 4, $output->toBytes());
+            if (!$context->opBarrier->wait(CooperativeContext::BARRIER_TIMEOUT)) {
+                throw new RuntimeException('Gated delta net barrier timed out');
+            }
+            $output = ToyBackend::fromBytes($context->exchange->read(0, $innerSize * 4), [$innerSize]);
+        }
         $this->debugTensor('final_output-' . $layer, $output);
 
         $result = $this->graph->linear(

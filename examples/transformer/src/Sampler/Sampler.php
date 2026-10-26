@@ -16,9 +16,11 @@ namespace Swow\Examples\Transformer\Sampler;
 
 use RuntimeException;
 
+use function array_search;
 use function count;
 use function exp;
 use function is_finite;
+use function max;
 
 use const INF;
 
@@ -102,12 +104,18 @@ final class Sampler
     /** @param list<float> $logits */
     private function argmax(array $logits): int
     {
-        $best = 0;
-        $maximum = -INF;
-        foreach ($logits as $id => $value) {
-            if ($value > $maximum) {
-                $maximum = $value;
-                $best = $id;
+        /* max() and array_search() scan in C; both keep the first maximum, so
+         * the choice matches the element by element scan over the vocabulary */
+        $maximum = max($logits);
+        $best = array_search($maximum, $logits, true);
+        if ($best === false) {
+            $best = 0;
+            $maximum = -INF;
+            foreach ($logits as $id => $value) {
+                if ($value > $maximum) {
+                    $maximum = $value;
+                    $best = $id;
+                }
             }
         }
         if (!is_finite($maximum)) {
