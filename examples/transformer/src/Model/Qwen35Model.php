@@ -378,7 +378,6 @@ final class Qwen35Model
         $headCount = $this->config->headCount;
         $split = $context !== null
             && $context->threads > 1
-            && $headCount >= 2 * $context->threads
             && $headCount * $headDim <= CooperativeContext::EXCHANGE_FLOATS;
         [$headBegin, $headEnd] = $split ? $context->range($headCount) : [0, $headCount];
         $attention = [];
@@ -414,7 +413,9 @@ final class Qwen35Model
         $this->debug('attn_pregate-' . $layer, $pregate);
         if ($split) {
             /* The pregate mark above holds the local heads only */
-            $context->exchange->writeF64($headBegin * $headDim * 8, $attention);
+            if ($attention !== []) {
+                $context->exchange->writeF64($headBegin * $headDim * 8, $attention);
+            }
             if (!$context->opBarrier->wait(CooperativeContext::BARRIER_TIMEOUT)) {
                 throw new RuntimeException('Attention barrier timed out');
             }
@@ -617,7 +618,6 @@ final class Qwen35Model
         $context = CooperativeContext::current();
         $split = $context !== null
             && $context->threads > 1
-            && $heads >= 2 * $context->threads
             && $innerSize <= CooperativeContext::EXCHANGE_FLOATS;
         [$headBegin, $headEnd] = $split ? $context->range($heads) : [0, $heads];
         $workerHeads = $headEnd - $headBegin;
@@ -627,95 +627,101 @@ final class Qwen35Model
         $history = $this->convHistory[$layer] ??= Tensor::zeros('f32', [$kernel, $convDim]);
         shift_rows($history, $qkv->toTensor(), $history);
         $convWeight = $this->constTensor($prefix . '.ssm_conv1d.weight', [$convDim, $kernel]);
-        if ($split) {
-            $conv = Tensor::zeros('f32', [$convDim]);
-            conv1d_silu(
-                $convWeight,
-                $history,
-                $convDim,
-                $kernel,
-                $headBegin * $keyDim,
-                $workerHeads * $keyDim,
-                $conv,
+
+        /* A worker without a head still joins the barrier of the section */
+        if ($workerHeads > 0) {
+            if ($split) {
+                $conv = Tensor::zeros('f32', [$convDim]);
+                conv1d_silu(
+                    $convWeight,
+                    $history,
+                    $convDim,
+                    $kernel,
+                    $headBegin * $keyDim,
+                    $workerHeads * $keyDim,
+                    $conv,
+                );
+                conv1d_silu(
+                    $convWeight,
+                    $history,
+                    $convDim,
+                    $kernel,
+                    $groupCount * $keyDim + $headBegin * $keyDim,
+                    $workerHeads * $keyDim,
+                    $conv,
+                );
+                conv1d_silu(
+                    $convWeight,
+                    $history,
+                    $convDim,
+                    $kernel,
+                    2 * $groupCount * $keyDim + $headBegin * $valueDim,
+                    $workerHeads * $valueDim,
+                    $conv,
+                );
+            } else {
+                $conv = conv1d_silu($convWeight, $history, $convDim, $kernel);
+            }
+            $this->debugTensor('conv_output_silu-' . $layer, $conv);
+
+            $bytes = $conv->toBytes();
+            $q = l2norm_rows(
+                ToyBackend::fromBytes(
+                    substr($bytes, $headBegin * $keyDim * 4, $workerHeads * $keyDim * 4),
+                    [$workerHeads, $keyDim],
+                ),
+                $this->config->rmsEps,
             );
-            conv1d_silu(
-                $convWeight,
-                $history,
-                $convDim,
-                $kernel,
-                $groupCount * $keyDim + $headBegin * $keyDim,
-                $workerHeads * $keyDim,
-                $conv,
+            $k = l2norm_rows(
+                ToyBackend::fromBytes(
+                    substr($bytes, ($groupCount * $keyDim + $headBegin * $keyDim) * 4, $workerHeads * $keyDim * 4),
+                    [$workerHeads, $keyDim],
+                ),
+                $this->config->rmsEps,
             );
-            conv1d_silu(
-                $convWeight,
-                $history,
-                $convDim,
-                $kernel,
-                2 * $groupCount * $keyDim + $headBegin * $valueDim,
-                $workerHeads * $valueDim,
-                $conv,
+            $v = ToyBackend::fromBytes(
+                substr(
+                    $bytes,
+                    (2 * $groupCount * $keyDim + $headBegin * $valueDim) * 4,
+                    $workerHeads * $valueDim * 4,
+                ),
+                [$workerHeads, $valueDim],
             );
-        } else {
-            $conv = conv1d_silu($convWeight, $history, $convDim, $kernel);
+            $this->debugTensor('q_conv_predelta-' . $layer, $q);
+            $this->debugTensor('k_conv_predelta-' . $layer, $k);
+
+            $state = $this->ssmStateTensor[$layer] ??= Tensor::zeros('f32', [$workerHeads, $valueDim, $keyDim]);
+
+            $output = gdn_recurrence(
+                $q,
+                $k,
+                $v,
+                ToyBackend::vector(array_slice($decay, $headBegin, $workerHeads), [$workerHeads]),
+                ToyBackend::vector(array_slice($beta, $headBegin, $workerHeads), [$workerHeads]),
+                $state,
+                0,
+                $workerHeads,
+                0,
+                $valueDim,
+                1.0 / sqrt((float) $keyDim),
+            );
+            $output = rmsnorm_rows(
+                $output,
+                $this->constTensor($prefix . '.ssm_norm.weight', [$valueDim]),
+                $this->config->rmsEps,
+            );
+            $output = mul(
+                $output->reshape([$workerHeads * $valueDim]),
+                silu(ToyBackend::fromBytes(
+                    substr($z->toBytes(), $headBegin * $valueDim * 4, $workerHeads * $valueDim * 4),
+                    [$workerHeads * $valueDim],
+                )),
+            );
         }
-        $this->debugTensor('conv_output_silu-' . $layer, $conv);
-
-        $bytes = $conv->toBytes();
-        $q = l2norm_rows(
-            ToyBackend::fromBytes(
-                substr($bytes, $headBegin * $keyDim * 4, $workerHeads * $keyDim * 4),
-                [$workerHeads, $keyDim],
-            ),
-            $this->config->rmsEps,
-        );
-        $k = l2norm_rows(
-            ToyBackend::fromBytes(
-                substr($bytes, ($groupCount * $keyDim + $headBegin * $keyDim) * 4, $workerHeads * $keyDim * 4),
-                [$workerHeads, $keyDim],
-            ),
-            $this->config->rmsEps,
-        );
-        $v = ToyBackend::fromBytes(
-            substr(
-                $bytes,
-                (2 * $groupCount * $keyDim + $headBegin * $valueDim) * 4,
-                $workerHeads * $valueDim * 4,
-            ),
-            [$workerHeads, $valueDim],
-        );
-        $this->debugTensor('q_conv_predelta-' . $layer, $q);
-        $this->debugTensor('k_conv_predelta-' . $layer, $k);
-
-        $state = $this->ssmStateTensor[$layer] ??= Tensor::zeros('f32', [$workerHeads, $valueDim, $keyDim]);
-
-        $output = gdn_recurrence(
-            $q,
-            $k,
-            $v,
-            ToyBackend::vector(array_slice($decay, $headBegin, $workerHeads), [$workerHeads]),
-            ToyBackend::vector(array_slice($beta, $headBegin, $workerHeads), [$workerHeads]),
-            $state,
-            0,
-            $workerHeads,
-            0,
-            $valueDim,
-            1.0 / sqrt((float) $keyDim),
-        );
-        $output = rmsnorm_rows(
-            $output,
-            $this->constTensor($prefix . '.ssm_norm.weight', [$valueDim]),
-            $this->config->rmsEps,
-        );
-        $output = mul(
-            $output->reshape([$workerHeads * $valueDim]),
-            silu(ToyBackend::fromBytes(
-                substr($z->toBytes(), $headBegin * $valueDim * 4, $workerHeads * $valueDim * 4),
-                [$workerHeads * $valueDim],
-            )),
-        );
         if ($split) {
-            $context->exchange->write($headBegin * $valueDim * 4, $output->toBytes());
+            if ($workerHeads > 0) {
+                $context->exchange->write($headBegin * $valueDim * 4, $output->toBytes());
+            }
             if (!$context->opBarrier->wait(CooperativeContext::BARRIER_TIMEOUT)) {
                 throw new RuntimeException('Gated delta net barrier timed out');
             }
