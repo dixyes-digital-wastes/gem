@@ -1,0 +1,44 @@
+{
+    "name": "dixyes/gem",
+    "description": "PHP matrix kernels and GGUF transformer inference",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "gemm",
+        "gguf",
+        "inference",
+        "transformer"
+    ],
+    "require": {
+        "php": ">=8.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^13.0"
+    },
+    "suggest": {
+        "ext-swow": "Runs inference workers on cooperative threads",
+        "ext-toy": "Accelerates matrix kernels with native code",
+        "ext-ffi": "Binds native libraries for tensor operations"
+    },
+    "autoload": {
+        "psr-4": {
+            "Dixyes\\Gem\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Dixyes\\Gem\\Tests\\": "tests/"
+        }
+    },
+    "bin": [
+        "bin/generate.php",
+        "bin/chat.php",
+        "bin/bench.php"
+    ],
+    "scripts": {
+        "test": "@php vendor/bin/phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
