@@ -18,8 +18,8 @@ use Dixyes\Gem\Tokenizer\QwenTokenizer;
 
 if ($argc < 2) {
     fwrite(STDERR, "usage: chat.php <model.gguf> [options]\n");
-    fwrite(STDERR, "  --context=N       context token limit, default 2048\n");
-    fwrite(STDERR, "  --tokens=N        max new tokens per turn, default 32\n");
+    fwrite(STDERR, "  --context=N       context token limit, default 4096\n");
+    fwrite(STDERR, "  --tokens=N        max new tokens per turn, default 1024\n");
     fwrite(STDERR, "  --system=TEXT     system message, default \"You are a helpful assistant\"\n");
     fwrite(STDERR, "  --no-system       disable the system message\n");
     fwrite(STDERR, "  --thinking        enable Qwen thinking prompt\n");
@@ -32,8 +32,8 @@ if ($argc < 2) {
 }
 
 $modelPath = $argv[1];
-$contextLimit = 2048;
-$maxTokens = 32;
+$contextLimit = 4096;
+$maxTokens = 1024;
 $system = 'You are a helpful assistant';
 $thinking = false;
 $threads = ThreadConfig::defaultThreads();

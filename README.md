@@ -100,8 +100,8 @@ php bin/chat.php models/qwen3.5-0.8b/Qwen3.5-0.8B.Q8_0.gguf
 Options:
 
 ```text
---context=N       context token limit, default 2048
---tokens=N        max new tokens per turn, default 32
+--context=N       context token limit, default 4096
+--tokens=N        max new tokens per turn, default 1024
 --system=TEXT     system message
 --no-system       disable the system message
 --thinking        enable the Qwen thinking prompt

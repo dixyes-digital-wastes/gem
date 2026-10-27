@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Dixyes\Gem\Tests;
 
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
 use Dixyes\Gem\Chat\ChatMessage;
 use Dixyes\Gem\Chat\ContextLimitException;
 use Dixyes\Gem\Chat\Conversation;
@@ -117,6 +118,19 @@ final class ConversationTest extends TestCase
 
         $this->expectException(ContextLimitException::class);
         $conversation->respond('Hi');
+    }
+
+    public function testDefaultLimits(): void
+    {
+        $defaults = [];
+        foreach ((new ReflectionMethod(Conversation::class, '__construct'))->getParameters() as $parameter) {
+            if ($parameter->isDefaultValueAvailable()) {
+                $defaults[$parameter->getName()] = $parameter->getDefaultValue();
+            }
+        }
+
+        $this->assertSame(4096, $defaults['contextLimit']);
+        $this->assertSame(1024, $defaults['maxTokens']);
     }
 
     private function fake(QwenTokenizer $tokenizer, int $token): object
