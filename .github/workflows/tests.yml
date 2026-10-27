@@ -96,9 +96,18 @@ jobs:
         run: |
           php -v
           php -m | grep -E 'swow|toy' || true
+          if [ "${{ matrix.swow }}" = "true" ]; then
+            php -r 'exit(extension_loaded("swow") ? 0 : 1);'
+          fi
+          if [ "${{ matrix.toy }}" = "true" ]; then
+            php -r 'exit(extension_loaded("toy") ? 0 : 1);'
+          fi
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
       - name: Run PHPUnit
+        env:
+          GEM_EXPECT_SWOW: ${{ matrix.swow }}
+          GEM_EXPECT_TOY: ${{ matrix.toy }}
         run: vendor/bin/phpunit --testsuite gem

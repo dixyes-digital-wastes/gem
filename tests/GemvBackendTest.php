@@ -16,6 +16,7 @@ use Swow\SharedBuffer;
 use Swow\Sync\ThreadBarrier;
 
 use function class_exists;
+use function getenv;
 use function ini_get;
 use function intdiv;
 use function Toy\Tensor\kernel_stats;
@@ -34,6 +35,9 @@ final class GemvBackendTest extends TestCase
     public function testSwowMultithreadedGemv(): void
     {
         if (!class_exists(\Swow\Thread::class)) {
+            if (getenv('GEM_EXPECT_SWOW') === 'true') {
+                self::fail('Swow is not loaded although the job requires it');
+            }
             $this->markTestSkipped('Swow is not loaded');
         }
 
@@ -76,6 +80,9 @@ final class GemvBackendTest extends TestCase
     public function testToyGeneratedKernels(): void
     {
         if (!ToyBackend::enabled() || (int) ini_get('toy.kernel_arena_size') === 0) {
+            if (getenv('GEM_EXPECT_TOY') === 'true') {
+                self::fail('Toy is not loaded or its kernel arena is disabled');
+            }
             $this->markTestSkipped('Toy generated kernels are not enabled');
         }
         $weight = self::weight(4, 64);
