@@ -6,108 +6,219 @@ on:
   workflow_dispatch:
 
 jobs:
-  phpunit:
-    name: ${{ matrix.mode }}
+  linux:
+    name: Linux phpunit backends
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - mode: native
-            phpts: nts
-            swow: false
-            toy: false
-          - mode: swow
-            phpts: zts
-            swow: true
-            toy: false
-          - mode: swow-toy
-            phpts: zts
-            swow: true
-            toy: true
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         env:
-          phpts: ${{ matrix.phpts }}
+          phpts: zts
         with:
           php-version: '8.5'
           coverage: none
           tools: composer:v2
 
       - name: Check out Swow
-        if: matrix.swow
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: swow/swow
           ref: 691a2ced3072a7e3cd983a6863e74dc76169391c
           path: third_party/swow
 
       - name: Check out Toy
-        if: matrix.toy
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: dixyes-digital-wastes/ext-toy
           ref: 739ab0275923f3bfdb3a18bf88b14a16d7ceef08
           path: third_party/toy
 
       - name: Install extension build dependencies
-        if: matrix.swow || matrix.toy
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf automake build-essential libssl-dev libcurl4-openssl-dev pkg-config
 
       - name: Build Swow
-        if: matrix.swow
         run: |
           cd third_party/swow/ext
           phpize
           ./configure --enable-swow --disable-swow-curl --disable-swow-ssl --disable-swow-pdo-pgsql
           make -j"$(nproc)"
-          sudo make install
-          ini_dir="$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')"
-          if [ -z "$ini_dir" ]; then
-            ini_dir="$(php --ini | sed -n 's/^Loaded Configuration File: //p' | xargs dirname)/conf.d"
-          fi
-          sudo mkdir -p "$ini_dir"
-          echo "extension=swow.so" | sudo tee "$ini_dir/20-swow.ini"
+          echo "SWOW_EXT=$PWD/modules/swow.so" >> "$GITHUB_ENV"
 
       - name: Build Toy
-        if: matrix.toy
         run: |
           cd third_party/toy
           phpize
           ./configure --enable-toy
           make -j"$(nproc)"
-          sudo make install
-          ini_dir="$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')"
-          if [ -z "$ini_dir" ]; then
-            ini_dir="$(php --ini | sed -n 's/^Loaded Configuration File: //p' | xargs dirname)/conf.d"
-          fi
-          sudo mkdir -p "$ini_dir"
-          echo "extension=toy.so" | sudo tee "$ini_dir/30-toy.ini"
+          echo "TOY_EXT=$PWD/modules/toy.so" >> "$GITHUB_ENV"
 
       - name: Show extensions
         run: |
           php -v
-          php -m | grep -E 'swow|toy' || true
-          if [ "${{ matrix.swow }}" = "true" ]; then
-            php -r 'exit(extension_loaded("swow") ? 0 : 1);'
-          fi
-          if [ "${{ matrix.toy }}" = "true" ]; then
-            php -r 'exit(extension_loaded("toy") ? 0 : 1);'
-          fi
+          php -d extension="$SWOW_EXT" -r 'exit(extension_loaded("swow") ? 0 : 1);'
+          php -d extension="$SWOW_EXT" -d extension="$TOY_EXT" -r 'exit(extension_loaded("toy") ? 0 : 1);'
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
-      - name: Run PHPUnit
-        env:
-          GEM_EXPECT_SWOW: ${{ matrix.swow }}
-          GEM_EXPECT_TOY: ${{ matrix.toy }}
+      - name: Run native tests
         run: vendor/bin/phpunit --testsuite gem
+
+      - name: Run Swow tests
+        env:
+          GEM_EXPECT_SWOW: 'true'
+        run: php -d extension="$SWOW_EXT" vendor/bin/phpunit --testsuite gem
+
+      - name: Run Swow and Toy tests
+        env:
+          GEM_EXPECT_SWOW: 'true'
+          GEM_EXPECT_TOY: 'true'
+        run: php -d extension="$SWOW_EXT" -d extension="$TOY_EXT" vendor/bin/phpunit --testsuite gem
+
+  macos:
+    name: macOS phpunit backends
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        env:
+          phpts: zts
+        with:
+          php-version: '8.5'
+          coverage: none
+          tools: composer:v2
+
+      - name: Check out Swow
+        uses: actions/checkout@v7
+        with:
+          repository: swow/swow
+          ref: 691a2ced3072a7e3cd983a6863e74dc76169391c
+          path: third_party/swow
+
+      - name: Check out Toy
+        uses: actions/checkout@v7
+        with:
+          repository: dixyes-digital-wastes/ext-toy
+          ref: 739ab0275923f3bfdb3a18bf88b14a16d7ceef08
+          path: third_party/toy
+
+      - name: Install extension build dependencies
+        run: brew install autoconf automake pkg-config
+
+      - name: Build Swow
+        run: |
+          cd third_party/swow/ext
+          phpize
+          ./configure --enable-swow --disable-swow-curl --disable-swow-ssl --disable-swow-pdo-pgsql
+          make -j"$(sysctl -n hw.ncpu)"
+          echo "SWOW_EXT=$PWD/modules/swow.so" >> "$GITHUB_ENV"
+
+      - name: Build Toy
+        run: |
+          cd third_party/toy
+          phpize
+          ./configure --enable-toy
+          make -j"$(sysctl -n hw.ncpu)"
+          echo "TOY_EXT=$PWD/modules/toy.so" >> "$GITHUB_ENV"
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run native tests
+        run: vendor/bin/phpunit --testsuite gem
+
+      - name: Run Swow tests
+        env:
+          GEM_EXPECT_SWOW: 'true'
+        run: php -d extension="$SWOW_EXT" vendor/bin/phpunit --testsuite gem
+
+      - name: Run Swow and Toy tests
+        env:
+          GEM_EXPECT_SWOW: 'true'
+          GEM_EXPECT_TOY: 'true'
+        run: php -d extension="$SWOW_EXT" -d extension="$TOY_EXT" vendor/bin/phpunit --testsuite gem
+
+  windows:
+    name: Windows phpunit backends
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        env:
+          phpts: zts
+        with:
+          php-version: '8.5'
+          coverage: none
+          tools: composer:v2
+
+      - name: Check out PHP source
+        uses: actions/checkout@v7
+        with:
+          repository: php/php-src
+          ref: PHP-8.5
+          path: build/php-src
+
+      - name: Check out Swow
+        uses: actions/checkout@v7
+        with:
+          repository: swow/swow
+          ref: 691a2ced3072a7e3cd983a6863e74dc76169391c
+          path: build/php-src/ext/swow
+
+      - name: Check out Toy
+        uses: actions/checkout@v7
+        with:
+          repository: dixyes-digital-wastes/ext-toy
+          ref: 739ab0275923f3bfdb3a18bf88b14a16d7ceef08
+          path: build/php-src/ext/toy
+
+      - name: Check out the PHP build tools
+        uses: actions/checkout@v7
+        with:
+          repository: php/php-sdk-binary-tools
+          ref: master
+          path: php-sdk-binary-tools
+
+      - name: Build extensions
+        shell: cmd
+        working-directory: build/php-src
+        run: call "%GITHUB_WORKSPACE%\php-sdk-binary-tools\phpsdk-starter.bat" -c vs18 -a x64 -t %GITHUB_WORKSPACE%\windows-ext-build.bat
+
+      - name: Set extension paths
+        shell: pwsh
+        run: |
+          "SWOW_EXT=$PWD\build\php-src\x64\Release_TS\php_swow.dll" >> $env:GITHUB_ENV
+          "TOY_EXT=$PWD\build\php-src\x64\Release_TS\php_toy.dll" >> $env:GITHUB_ENV
+          Get-Item $env:SWOW_EXT, $env:TOY_EXT | Select-Object FullName
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run native tests
+        shell: pwsh
+        run: php vendor/bin/phpunit --testsuite gem
+
+      - name: Run Swow tests
+        shell: pwsh
+        env:
+          GEM_EXPECT_SWOW: 'true'
+        run: php -d extension=$env:SWOW_EXT vendor/bin/phpunit --testsuite gem
+
+      - name: Run Swow and Toy tests
+        shell: pwsh
+        env:
+          GEM_EXPECT_SWOW: 'true'
+          GEM_EXPECT_TOY: 'true'
+        run: php -d extension=$env:SWOW_EXT -d extension=$env:TOY_EXT vendor/bin/phpunit --testsuite gem
