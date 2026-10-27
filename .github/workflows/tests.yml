@@ -110,10 +110,17 @@ jobs:
           path: third_party/toy
 
       - name: Install extension build dependencies
-        run: brew install autoconf automake pkg-config
+        run: brew install autoconf automake pkg-config openssl@3
 
+      # swow_socket.c includes openssl/evp.h unconditionally, while
+      # --disable-swow-ssl keeps its own OpenSSL detection off, so the header
+      # path has to come from the environment
       - name: Build Swow
         run: |
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          export CPATH="${OPENSSL_PREFIX}/include"
+          export CPPFLAGS="-I${OPENSSL_PREFIX}/include"
+          export LDFLAGS="-L${OPENSSL_PREFIX}/lib"
           cd third_party/swow/ext
           phpize
           ./configure --enable-swow --disable-swow-curl --disable-swow-ssl --disable-swow-pdo-pgsql
@@ -173,7 +180,7 @@ jobs:
         with:
           repository: swow/swow
           ref: 691a2ced3072a7e3cd983a6863e74dc76169391c
-          path: build/php-src/ext/swow
+          path: build/swow
 
       - name: Check out Toy
         uses: actions/checkout@v7
@@ -188,17 +195,75 @@ jobs:
           ref: master
           path: php-sdk-binary-tools
 
+      # The swow repository keeps the extension in its own ext/ directory, while
+      # an in-tree PHP build only reads ext/<name>/config.w32
+      - name: Stage Swow extension
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "build/php-src/ext/swow" | Out-Null
+          Copy-Item -Recurse -Force "build/swow/ext/*" "build/php-src/ext/swow"
+
+      # swow_socket.c includes openssl/evp.h unconditionally, while
+      # --disable-swow-ssl keeps its own OpenSSL detection off, so the header
+      # path has to come from the environment
+      - name: Locate OpenSSL headers
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\OpenSSL-Win64\include",
+            "$env:ProgramFiles\OpenSSL\include",
+            "${env:ProgramFiles(x86)}\OpenSSL-Win32\include",
+            "C:\OpenSSL-Win64\include",
+            "C:\vcpkg\installed\x64-windows\include"
+          )
+          $candidates += Get-ChildItem -Path "$env:ProgramFiles", "C:\" -Directory -Filter "OpenSSL*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "include" }
+          $include = $candidates |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_ "openssl\evp.h") } |
+            Select-Object -First 1
+          if (-not $include) {
+            Write-Host "OpenSSL headers not found; tried:"
+            $candidates | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          if ($env:INCLUDE) {
+            "INCLUDE=$include;$env:INCLUDE" >> $env:GITHUB_ENV
+          } else {
+            "INCLUDE=$include" >> $env:GITHUB_ENV
+          }
+
       - name: Build extensions
         shell: cmd
         working-directory: build/php-src
-        run: call "%GITHUB_WORKSPACE%\php-sdk-binary-tools\phpsdk-starter.bat" -c vs18 -a x64 -t %GITHUB_WORKSPACE%\windows-ext-build.bat
+        run: |
+          call "%GITHUB_WORKSPACE%\php-sdk-binary-tools\phpsdk-starter.bat" -c vs18 -a x64 -t %GITHUB_WORKSPACE%\windows-ext-build.bat
+          if errorlevel 1 exit /b 1
+          if not exist x64\Release_TS\php_swow.dll (
+            echo Missing php_swow.dll
+            exit /b 1
+          )
+          if not exist x64\Release_TS\php_toy.dll (
+            echo Missing php_toy.dll
+            exit /b 1
+          )
 
       - name: Set extension paths
         shell: pwsh
         run: |
           "SWOW_EXT=$PWD\build\php-src\x64\Release_TS\php_swow.dll" >> $env:GITHUB_ENV
           "TOY_EXT=$PWD\build\php-src\x64\Release_TS\php_toy.dll" >> $env:GITHUB_ENV
-          Get-Item $env:SWOW_EXT, $env:TOY_EXT | Select-Object FullName
+
+      - name: Check extension binaries
+        shell: pwsh
+        run: |
+          foreach ($name in "SWOW_EXT", "TOY_EXT") {
+            $path = [Environment]::GetEnvironmentVariable($name)
+            if (-not $path -or -not (Test-Path -LiteralPath $path)) {
+              Write-Host "Missing extension binary: ${name}=$path"
+              exit 1
+            }
+            Get-Item -LiteralPath $path | Select-Object FullName
+          }
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
