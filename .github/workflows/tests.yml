@@ -238,16 +238,21 @@ jobs:
       - name: Resolve MSVC toolset
         shell: pwsh
         run: |
-          $toolsets = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^14\.4\d*\.' } |
+          $patterns = @(
+            "$env:ProgramFiles\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*",
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*"
+          )
+          $toolsets = $patterns |
+            ForEach-Object { Get-ChildItem $_ -Directory -ErrorAction SilentlyContinue } |
             Sort-Object Name
-          if (-not $toolsets) {
+          Write-Host "Toolsets: $($toolsets.Name -join ', ')"
+          $toolset = $toolsets | Where-Object { $_.Name -match '^14\.4\d*\.' } | Select-Object -Last 1
+          if (-not $toolset) {
             Write-Host "No 14.4x MSVC toolset found"
             exit 1
           }
-          $toolset = $toolsets[-1].Name
-          Write-Host "Using MSVC toolset $toolset"
-          "MSVC_TOOLSET=$toolset" >> $env:GITHUB_ENV
+          Write-Host "Using MSVC toolset $($toolset.Name)"
+          "MSVC_TOOLSET=$($toolset.Name)" >> $env:GITHUB_ENV
 
       - name: Build extensions
         shell: cmd
