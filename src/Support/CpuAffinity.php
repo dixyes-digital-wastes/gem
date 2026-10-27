@@ -6,6 +6,7 @@ namespace Dixyes\Gem\Support;
 
 use FFI;
 use RuntimeException;
+use Throwable;
 
 use function array_slice;
 use function basename;
@@ -39,6 +40,8 @@ final class CpuAffinity
 
     private static ?FFI $windowsFfi = null;
 
+    private static ?bool $darwinSupported = null;
+
     /** @return list<int> one logical CPU per physical core */
     public static function physicalCpus(string $mapping = 'auto'): array
     {
@@ -60,8 +63,14 @@ final class CpuAffinity
             return false;
         }
         $enabled = ini_get('ffi.enable');
+        if (!($enabled === '1' || $enabled === 'true' || $enabled === 'on')) {
+            return false;
+        }
+        if (PHP_OS_FAMILY === 'Darwin') {
+            return self::$darwinSupported ??= self::darwinAffinitySupported();
+        }
 
-        return $enabled === '1' || $enabled === 'true' || $enabled === 'on';
+        return true;
     }
 
     public static function pin(int $cpu): void
@@ -180,13 +189,31 @@ final class CpuAffinity
         return $value[0];
     }
 
+    private static function darwinAffinitySupported(): bool
+    {
+        try {
+            $ffi = self::darwinFfi();
+            $info = $ffi->new('integer_t[1]');
+            $info[0] = 0;
+            $thread = $ffi->mach_thread_self();
+            $result = $ffi->thread_policy_set($thread, self::THREAD_AFFINITY_POLICY, $info, 1);
+            $ffi->mach_port_deallocate($ffi->mach_task_self_, $thread);
+
+            return $result === 0;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
     private static function pinDarwin(int $cpu): void
     {
         $ffi = self::darwinFfi();
         $info = $ffi->new('integer_t[1]');
         $info[0] = $cpu + 1;
         $thread = $ffi->mach_thread_self();
-        if ($ffi->thread_policy_set($thread, self::THREAD_AFFINITY_POLICY, $info, 1) !== 0) {
+        $result = $ffi->thread_policy_set($thread, self::THREAD_AFFINITY_POLICY, $info, 1);
+        $ffi->mach_port_deallocate($ffi->mach_task_self_, $thread);
+        if ($result !== 0) {
             throw new RuntimeException("Unable to set affinity hint for CPU {$cpu}");
         }
     }
@@ -205,8 +232,10 @@ final class CpuAffinity
 typedef unsigned int mach_port_t;
 typedef int kern_return_t;
 typedef unsigned int integer_t;
+extern mach_port_t mach_task_self_;
 int sysctlbyname(const char *name, void *oldp, unsigned long *oldlenp, void *newp, unsigned long newlen);
 mach_port_t mach_thread_self(void);
+int mach_port_deallocate(mach_port_t task, mach_port_t name);
 kern_return_t thread_policy_set(mach_port_t thread, int flavor, integer_t *policy_info, unsigned int count);
 C,
             null,
