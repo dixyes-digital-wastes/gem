@@ -20,6 +20,7 @@ use function class_exists;
 use function getenv;
 use function ini_get;
 use function intdiv;
+use function substr;
 use function Toy\Tensor\kernel_stats;
 
 final class GemvBackendTest extends TestCase
@@ -75,7 +76,7 @@ final class GemvBackendTest extends TestCase
         }
         Threads::join($workers);
 
-        self::assertSameFloats($expected, $outputA->viewF64(0, $rows), ToyBackend::enabled());
+        self::assertSameFloats($expected, $outputA->viewF64(0, $rows), self::f32Delta($weight, $input));
     }
 
     public function testToyGeneratedKernels(): void
@@ -121,14 +122,39 @@ final class GemvBackendTest extends TestCase
     }
 
     /** @param list<float> $expected @param list<float> $actual */
-    private static function assertSameFloats(array $expected, array $actual, bool $f32 = false): void
+    private static function assertSameFloats(array $expected, array $actual, ?callable $delta = null): void
     {
         self::assertCount(count($expected), $actual);
         foreach ($expected as $index => $value) {
-            /* A f32 row sums the whole column range, so the delta has to grow
-             * with the magnitude instead of staying absolute */
-            $delta = $f32 ? max(1e-6, abs($value) * 1e-5) : 1e-5;
-            self::assertEqualsWithDelta($value, $actual[$index], $delta, "row {$index}");
+            self::assertEqualsWithDelta(
+                $value,
+                $actual[$index],
+                $delta === null ? 1e-5 : $delta($index, $value),
+                "row {$index}",
+            );
         }
+    }
+
+    /*
+    * A f32 row rounds its whole dot product, so the error follows the summed
+    * magnitude of the terms rather than the magnitude of the result
+    */
+    private static function f32Delta(Weight $weight, array $input): ?callable
+    {
+        if (!ToyBackend::enabled()) {
+            return null;
+        }
+        $data = $weight->data();
+        $blocks = intdiv($weight->columns(), Q8_0::BLOCK_SIZE);
+        $blockBytes = $blocks * Q8_0::BLOCK_BYTES;
+
+        return static function (int $row, float $expected) use ($data, $input, $blockBytes): float {
+            $magnitude = 0.0;
+            foreach (Q8_0::dequantize(substr($data, $row * $blockBytes, $blockBytes)) as $index => $value) {
+                $magnitude += abs($value * $input[$index]);
+            }
+
+            return max(1e-6, abs($expected) * 1e-6, $magnitude * 1e-7);
+        };
     }
 }
