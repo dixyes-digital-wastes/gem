@@ -27,11 +27,27 @@ const MODEL_FILES = [
 function projectRoot(): string
 {
     $autoload = $GLOBALS['_composer_autoload_path'] ?? null;
-    if (is_string($autoload) && $autoload !== '') {
-        return dirname($autoload, 2);
+    $root = is_string($autoload) && $autoload !== '' ? dirname($autoload, 2) : dirname(__DIR__);
+
+    if (str_starts_with($root, 'phar://')) {
+        return getcwd() ?: sys_get_temp_dir();
     }
 
-    return dirname(__DIR__);
+    return $root;
+}
+
+function caBundle(): ?string
+{
+    foreach ([dirname(__DIR__) . '/resources/cacert.pem', __DIR__ . '/../resources/cacert.pem'] as $path) {
+        if (is_file($path)) {
+            $data = file_get_contents($path);
+            if ($data !== false && $data !== '') {
+                return $data;
+            }
+        }
+    }
+
+    return null;
 }
 
 function usage(): void
@@ -52,7 +68,7 @@ download options:
   --token=TOKEN           access token, default HF_TOKEN or MODELSCOPE_API_TOKEN
   --force                 remove an existing file and download again
 
-Output defaults to models/qwen3.5-0.8b under the project root
+Output defaults to models/qwen3.5-0.8b under the current directory
 
 TXT);
     exit(1);
@@ -198,7 +214,7 @@ function download(string $source, array $entry, string $directory, ?string $toke
         if ($token !== null && $token !== '') {
             $headers[] = 'Authorization: Bearer ' . $token;
         }
-        curl_setopt_array($curl, [
+        $curlOptions = [
             CURLOPT_FILE => $file,
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_FAILONERROR => true,
@@ -230,7 +246,12 @@ function download(string $source, array $entry, string $directory, ?string $toke
 
                 return 0;
             },
-        ]);
+        ];
+        $ca = caBundle();
+        if ($ca !== null && defined('CURLOPT_CAINFO_BLOB')) {
+            $curlOptions[CURLOPT_CAINFO_BLOB] = $ca;
+        }
+        curl_setopt_array($curl, $curlOptions);
         if ($offset > 0) {
             curl_setopt($curl, CURLOPT_RANGE, $offset . '-');
         }
