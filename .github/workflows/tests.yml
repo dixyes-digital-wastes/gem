@@ -1,0 +1,104 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  phpunit:
+    name: ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: native
+            phpts: nts
+            swow: false
+            toy: false
+          - mode: swow
+            phpts: zts
+            swow: true
+            toy: false
+          - mode: swow-toy
+            phpts: zts
+            swow: true
+            toy: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        env:
+          phpts: ${{ matrix.phpts }}
+        with:
+          php-version: '8.5'
+          coverage: none
+          tools: composer:v2
+
+      - name: Check out Swow
+        if: matrix.swow
+        uses: actions/checkout@v4
+        with:
+          repository: swow/swow
+          ref: 691a2ced3072a7e3cd983a6863e74dc76169391c
+          path: third_party/swow
+
+      - name: Check out Toy
+        if: matrix.toy
+        uses: actions/checkout@v4
+        with:
+          repository: dixyes-digital-wastes/ext-toy
+          ref: 739ab0275923f3bfdb3a18bf88b14a16d7ceef08
+          path: third_party/toy
+
+      - name: Install extension build dependencies
+        if: matrix.swow || matrix.toy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake build-essential libssl-dev libcurl4-openssl-dev pkg-config
+
+      - name: Build Swow
+        if: matrix.swow
+        run: |
+          cd third_party/swow/ext
+          phpize
+          ./configure --enable-swow --disable-swow-curl --disable-swow-ssl --disable-swow-pdo-pgsql
+          make -j"$(nproc)"
+          sudo make install
+          ini_dir="$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')"
+          if [ -z "$ini_dir" ]; then
+            ini_dir="$(php --ini | sed -n 's/^Loaded Configuration File: //p' | xargs dirname)/conf.d"
+          fi
+          sudo mkdir -p "$ini_dir"
+          echo "extension=swow.so" | sudo tee "$ini_dir/20-swow.ini"
+
+      - name: Build Toy
+        if: matrix.toy
+        run: |
+          cd third_party/toy
+          phpize
+          ./configure --enable-toy
+          make -j"$(nproc)"
+          sudo make install
+          ini_dir="$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')"
+          if [ -z "$ini_dir" ]; then
+            ini_dir="$(php --ini | sed -n 's/^Loaded Configuration File: //p' | xargs dirname)/conf.d"
+          fi
+          sudo mkdir -p "$ini_dir"
+          echo "extension=toy.so" | sudo tee "$ini_dir/30-toy.ini"
+
+      - name: Show extensions
+        run: |
+          php -v
+          php -m | grep -E 'swow|toy' || true
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit --testsuite gem
