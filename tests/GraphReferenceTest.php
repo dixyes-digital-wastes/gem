@@ -9,6 +9,7 @@ use Dixyes\Gem\Graph\DType;
 use Dixyes\Gem\Graph\Graph;
 use Dixyes\Gem\Graph\Shape;
 use Dixyes\Gem\Graph\Weight;
+use Dixyes\Gem\ToyBackend;
 
 use function array_map;
 use function array_slice;
@@ -75,7 +76,12 @@ final class GraphReferenceTest extends TestCase
         $this->assertSame([2.0, -1.0, 4.0], $sum->data());
         $this->assertSame([1.0, 4.0, 9.0], $product->data());
         foreach ($x->data() as $index => $value) {
-            $this->assertEqualsWithDelta($value / (1.0 + exp(-$value)), $silu->data()[$index], 1e-12);
+            $expected = $value / (1.0 + exp(-$value));
+            $this->assertEqualsWithDelta(
+                $expected,
+                $silu->data()[$index],
+                $this->referenceDelta($expected),
+            );
         }
     }
 
@@ -87,7 +93,8 @@ final class GraphReferenceTest extends TestCase
         $out = $graph->swiGlu($gate, $up);
 
         $this->assertSame(0.0, $out->data()[0]);
-        $this->assertEqualsWithDelta(3.0 / (1.0 + exp(-1.0)), $out->data()[1], 1e-12);
+        $swiGlu = 3.0 / (1.0 + exp(-1.0));
+        $this->assertEqualsWithDelta($swiGlu, $out->data()[1], $this->referenceDelta($swiGlu));
         $this->assertCount(2, $graph->trace()->ops());
         $this->assertSame(['silu', 'mul'], array_map(
             static fn($op): string => $op->name(),
@@ -161,6 +168,14 @@ final class GraphReferenceTest extends TestCase
             static fn(string $value): float => (float) $value,
             array_slice($fields, $offset, $count),
         );
+    }
+
+    /*
+    * Toy evaluates the graph in f32, so its rounding exceeds the f64 reference
+    */
+    private function referenceDelta(float $expected): float
+    {
+        return ToyBackend::enabled() ? max(1e-6, abs($expected) * 1e-6) : 1e-12;
     }
 
     /** @param list<float> $expected @param list<float> $actual */

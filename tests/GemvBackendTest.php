@@ -15,6 +15,7 @@ use Dixyes\Gem\ToyBackend;
 use Swow\SharedBuffer;
 use Swow\Sync\ThreadBarrier;
 
+use function abs;
 use function class_exists;
 use function getenv;
 use function ini_get;
@@ -74,7 +75,7 @@ final class GemvBackendTest extends TestCase
         }
         Threads::join($workers);
 
-        self::assertSameFloats($expected, $outputA->viewF64(0, $rows));
+        self::assertSameFloats($expected, $outputA->viewF64(0, $rows), ToyBackend::enabled());
     }
 
     public function testToyGeneratedKernels(): void
@@ -120,11 +121,14 @@ final class GemvBackendTest extends TestCase
     }
 
     /** @param list<float> $expected @param list<float> $actual */
-    private static function assertSameFloats(array $expected, array $actual): void
+    private static function assertSameFloats(array $expected, array $actual, bool $f32 = false): void
     {
         self::assertCount(count($expected), $actual);
         foreach ($expected as $index => $value) {
-            self::assertEqualsWithDelta($value, $actual[$index], 1e-5, "row {$index}");
+            /* A f32 row sums the whole column range, so the delta has to grow
+             * with the magnitude instead of staying absolute */
+            $delta = $f32 ? max(1e-6, abs($value) * 1e-5) : 1e-5;
+            self::assertEqualsWithDelta($value, $actual[$index], $delta, "row {$index}");
         }
     }
 }
