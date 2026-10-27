@@ -232,11 +232,28 @@ jobs:
             "INCLUDE=$include" >> $env:GITHUB_ENV
           }
 
+      # PHP refuses an extension linked with a newer MSVC than the core, and
+      # setup-php builds its core with 14.44, so the build has to use that
+      # toolset instead of the image default
+      - name: Resolve MSVC toolset
+        shell: pwsh
+        run: |
+          $toolsets = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^14\.4\d*\.' } |
+            Sort-Object Name
+          if (-not $toolsets) {
+            Write-Host "No 14.4x MSVC toolset found"
+            exit 1
+          }
+          $toolset = $toolsets[-1].Name
+          Write-Host "Using MSVC toolset $toolset"
+          "MSVC_TOOLSET=$toolset" >> $env:GITHUB_ENV
+
       - name: Build extensions
         shell: cmd
         working-directory: build/php-src
         run: |
-          call "%GITHUB_WORKSPACE%\php-sdk-binary-tools\phpsdk-starter.bat" -c vs18 -a x64 -t %GITHUB_WORKSPACE%\windows-ext-build.bat
+          call "%GITHUB_WORKSPACE%\php-sdk-binary-tools\phpsdk-starter.bat" -c vs18 -a x64 -s %MSVC_TOOLSET% -t %GITHUB_WORKSPACE%\windows-ext-build.bat
           if errorlevel 1 exit /b 1
           if not exist x64\Release_TS\php_swow.dll (
             echo Missing php_swow.dll
@@ -264,6 +281,13 @@ jobs:
             }
             Get-Item -LiteralPath $path | Select-Object FullName
           }
+
+      - name: Show extensions
+        shell: pwsh
+        run: |
+          php -v
+          php -d extension=$env:SWOW_EXT -r 'exit(extension_loaded("swow") ? 0 : 1);'
+          php -d extension=$env:SWOW_EXT -d extension=$env:TOY_EXT -r 'exit(extension_loaded("toy") ? 0 : 1);'
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
